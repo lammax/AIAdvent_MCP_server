@@ -179,7 +179,7 @@ enum MCP_server {
         )
 
         let mcpServer = await makeMCPServer(github: github)
-        let transport = StatefulHTTPServerTransport()
+        let transport = StatelessHTTPServerTransport()
 
         try await mcpServer.start(transport: transport)
 
@@ -198,27 +198,27 @@ enum MCP_server {
             return vaporResponse(from: httpResponse)
         }
 
-        app.on(.GET, "mcp") { req async throws -> Vapor.Response in
-            let httpRequest = HTTPRequest(
-                method: "GET",
-                headers: mcpHeaders(from: req.headers),
-                body: Data()
-            )
-
-            let httpResponse = await transport.handleRequest(httpRequest)
-            return vaporResponse(from: httpResponse)
-        }
-
-        app.on(.DELETE, "mcp") { req async throws -> Vapor.Response in
-            let httpRequest = HTTPRequest(
-                method: "DELETE",
-                headers: mcpHeaders(from: req.headers),
-                body: Data()
-            )
-
-            let httpResponse = await transport.handleRequest(httpRequest)
-            return vaporResponse(from: httpResponse)
-        }
+//        app.on(.GET, "mcp") { req async throws -> Vapor.Response in
+//            let httpRequest = HTTPRequest(
+//                method: "GET",
+//                headers: mcpHeaders(from: req.headers),
+//                body: Data()
+//            )
+//
+//            let httpResponse = await transport.handleRequest(httpRequest)
+//            return vaporResponse(from: httpResponse)
+//        }
+//
+//        app.on(.DELETE, "mcp") { req async throws -> Vapor.Response in
+//            let httpRequest = HTTPRequest(
+//                method: "DELETE",
+//                headers: mcpHeaders(from: req.headers),
+//                body: Data()
+//            )
+//
+//            let httpResponse = await transport.handleRequest(httpRequest)
+//            return vaporResponse(from: httpResponse)
+//        }
 
         try await app.execute()
     }
