@@ -4,12 +4,19 @@
 import PackageDescription
 
 let package = Package(
-    name: "GitHubMCPServer",
+    name: "MCPServer",
     platforms: [
-        .macOS(.v14)
-    ],
+            .macOS(.v14)
+        ],
     products: [
-        .executable(name: "GitHubMCPServer", targets: ["GitHubMCPServer"])
+        .executable(
+            name: "GitHubMCPServer",
+            targets: ["GitHubMCPServer"]
+        ),
+        .executable(
+            name: "UtilityMCPServer",
+            targets: ["UtilityMCPServer"]
+        )
     ],
     dependencies: [
         .package(url: "https://github.com/vapor/vapor.git", from: "4.121.3"),
@@ -17,12 +24,30 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift", branch: "master")
     ],
     targets: [
-        .executableTarget(
-            name: "GitHubMCPServer",
+        .target(
+            name: "Shared",
             dependencies: [
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "GRDB", package: "GRDB.swift")
+            ]
+        ),
+
+        .executableTarget(
+            name: "GitHubMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "UtilityMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
             ]
         )
     ]

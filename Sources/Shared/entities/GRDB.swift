@@ -8,7 +8,7 @@
 import Foundation
 import GRDB
 
-struct JobRecord: Codable, FetchableRecord, PersistableRecord {
+public struct JobRecord: Codable, FetchableRecord, PersistableRecord {
     var id: String
     var type: String
     var payload: String
@@ -17,7 +17,7 @@ struct JobRecord: Codable, FetchableRecord, PersistableRecord {
     var isActive: Bool
 }
 
-struct ResultRecord: Codable, FetchableRecord, PersistableRecord {
+public struct ResultRecord: Codable, FetchableRecord, PersistableRecord {
     var id: String
     var jobId: String
     var createdAt: Double

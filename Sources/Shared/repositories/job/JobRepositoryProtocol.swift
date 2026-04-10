@@ -7,7 +7,7 @@
 
 import Foundation
 
-protocol JobRepositoryProtocol: Sendable {
+public protocol JobRepositoryProtocol: Sendable {
     func save(_ job: Job) async throws
     func fetchDueJobs(_ date: Date) async throws -> [Job]
     func updateNextRun(jobId: String) async throws

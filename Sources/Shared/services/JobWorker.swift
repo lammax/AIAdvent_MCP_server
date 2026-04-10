@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum JobWorker {
+public enum JobWorker {
     
     static func run(_ job: Job) async throws -> String {
         switch job.type {
