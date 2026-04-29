@@ -15,7 +15,8 @@ internal import NIOFoundationCompat
 
 func makeGitHubMCPServer(
     github: GitHubAPI,
-    jobRepository: JobRepositoryProtocol
+    jobRepository: JobRepositoryProtocol,
+    projectRoot: URL?
 ) async -> MCP.Server {
     let server = Server(
         name: "github-mcp-server",
@@ -103,6 +104,15 @@ func makeGitHubMCPServer(
                         "required": .array([
                             .string("job_id")
                         ])
+                    ])
+                ),
+
+                Tool(
+                    name: "git_current_branch",
+                    description: "Get the current local git branch for the configured project repository.",
+                    inputSchema: .object([
+                        "type": .string("object"),
+                        "properties": .object([:])
                     ])
                 )
             ]
@@ -240,6 +250,34 @@ func makeGitHubMCPServer(
                 )
             }
 
+        case "git_current_branch":
+            guard let projectRoot else {
+                return .init(
+                    content: [.text(text: "Project root is not configured. Set PROJECT_ROOT or pass --project-root.", annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
+
+            do {
+                let branch = try currentGitBranch(projectRoot: projectRoot)
+                let payload = GitCurrentBranchResult(
+                    branch: branch,
+                    repository: projectRoot.lastPathComponent
+                )
+                let data = try JSONEncoder().encode(payload)
+                let json = String(data: data, encoding: .utf8) ?? "{}"
+
+                return .init(
+                    content: [.text(text: json, annotations: nil, _meta: nil)],
+                    isError: false
+                )
+            } catch {
+                return .init(
+                    content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
+
         default:
             return .init(
                 content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
@@ -269,13 +307,114 @@ private func parseIntervalSeconds(from value: Value?) -> Double? {
     return nil
 }
 
+private struct GitCurrentBranchResult: Encodable {
+    let branch: String
+    let repository: String
+}
+
+private func currentGitBranch(projectRoot: URL) throws -> String {
+    let process = Process()
+    let output = Pipe()
+    let errorOutput = Pipe()
+
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["rev-parse", "--abbrev-ref", "HEAD"]
+    process.currentDirectoryURL = projectRoot
+    process.standardOutput = output
+    process.standardError = errorOutput
+
+    try process.run()
+    process.waitUntilExit()
+
+    let outputData = output.fileHandleForReading.readDataToEndOfFile()
+    let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
+    let branch = String(data: outputData, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? ""
+
+    guard process.terminationStatus == 0, !branch.isEmpty else {
+        let message = String(data: errorData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        throw NSError(
+            domain: "GitHubMCPServer.Git",
+            code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "Unable to read current git branch."]
+        )
+    }
+
+    return branch
+}
+
+private struct GitHubMCPRuntimeConfiguration {
+    let projectRoot: URL?
+    let vaporArguments: [String]
+}
+
+private func runtimeConfiguration(
+    arguments: [String] = CommandLine.arguments,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> GitHubMCPRuntimeConfiguration {
+    var projectRootArgument: String?
+    var vaporArguments: [String] = []
+    var index = arguments.startIndex
+
+    while index < arguments.endIndex {
+        let argument = arguments[index]
+
+        if argument == "--project-root" {
+            let valueIndex = arguments.index(after: index)
+            if valueIndex < arguments.endIndex {
+                projectRootArgument = arguments[valueIndex]
+                index = arguments.index(after: valueIndex)
+            } else {
+                index = valueIndex
+            }
+            continue
+        }
+
+        if argument.hasPrefix("--project-root=") {
+            projectRootArgument = String(argument.dropFirst("--project-root=".count))
+            index = arguments.index(after: index)
+            continue
+        }
+
+        vaporArguments.append(argument)
+        index = arguments.index(after: index)
+    }
+
+    let rawProjectRoot = projectRootArgument
+        ?? environment["PROJECT_ROOT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    return GitHubMCPRuntimeConfiguration(
+        projectRoot: rawProjectRoot.flatMap(projectRootURL(from:)),
+        vaporArguments: vaporArguments
+    )
+}
+
+private func projectRootURL(from rawPath: String) -> URL? {
+    let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !path.isEmpty else {
+        return nil
+    }
+
+    let url: URL
+    if path.hasPrefix("/") {
+        url = URL(fileURLWithPath: path)
+    } else {
+        url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(path)
+    }
+
+    return url.standardizedFileURL
+}
 
 // MARK: - Vapor <-> MCP bridge
 
 @main
 enum GitHubMCPServer {
     static func main() async throws {
-        var env = try Environment.detect()
+        let configuration = runtimeConfiguration()
+        var env = try Environment.detect(arguments: configuration.vaporArguments)
         try LoggingSystem.bootstrap(from: &env)
 
         let app = try await Application.make(env)
@@ -297,7 +436,8 @@ enum GitHubMCPServer {
 
         let mcpServer = await makeGitHubMCPServer(
             github: github,
-            jobRepository: jobRepository
+            jobRepository: jobRepository,
+            projectRoot: configuration.projectRoot
         )
 
         let transport = StatelessHTTPServerTransport()

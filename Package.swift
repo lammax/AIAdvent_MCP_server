@@ -16,12 +16,17 @@ let package = Package(
         .executable(
             name: "UtilityMCPServer",
             targets: ["UtilityMCPServer"]
+        ),
+        .executable(
+            name: "RAGMCPServer",
+            targets: ["RAGMCPServer"]
         )
     ],
     dependencies: [
         .package(url: "https://github.com/vapor/vapor.git", from: "4.121.3"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.0"),
-        .package(url: "https://github.com/groue/GRDB.swift", branch: "master")
+        .package(url: "https://github.com/groue/GRDB.swift", branch: "master"),
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.19")
     ],
     targets: [
         .target(
@@ -29,7 +34,8 @@ let package = Package(
             dependencies: [
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "MCP", package: "swift-sdk"),
-                .product(name: "GRDB", package: "GRDB.swift")
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ]
         ),
 
@@ -44,6 +50,15 @@ let package = Package(
 
         .executableTarget(
             name: "UtilityMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "RAGMCPServer",
             dependencies: [
                 "Shared",
                 .product(name: "Vapor", package: "vapor"),
