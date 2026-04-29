@@ -1,0 +1,16 @@
+[
+  {
+    "userId": "U-42",
+    "name": "Test User",
+    "plan": "Premium",
+    "emailVerified": true,
+    "lastLoginAt": "2026-04-28T12:30:00Z"
+  },
+  {
+    "userId": "U-77",
+    "name": "Demo Customer",
+    "plan": "Free",
+    "emailVerified": false,
+    "lastLoginAt": "2026-04-27T09:15:00Z"
+  }
+]

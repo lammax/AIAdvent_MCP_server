@@ -20,6 +20,10 @@ let package = Package(
         .executable(
             name: "RAGMCPServer",
             targets: ["RAGMCPServer"]
+        ),
+        .executable(
+            name: "SupportMCPServer",
+            targets: ["SupportMCPServer"]
         )
     ],
     dependencies: [
@@ -59,6 +63,15 @@ let package = Package(
 
         .executableTarget(
             name: "RAGMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "SupportMCPServer",
             dependencies: [
                 "Shared",
                 .product(name: "Vapor", package: "vapor"),

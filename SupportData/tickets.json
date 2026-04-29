@@ -1,0 +1,31 @@
+[
+  {
+    "ticketId": "T-1001",
+    "userId": "U-42",
+    "subject": "Не работает авторизация",
+    "status": "open",
+    "messages": [
+      "После обновления не могу войти",
+      "Пишет invalid token"
+    ],
+    "metadata": {
+      "platform": "iOS",
+      "appVersion": "1.4.2",
+      "lastError": "auth_invalid_refresh_token"
+    }
+  },
+  {
+    "ticketId": "T-1002",
+    "userId": "U-77",
+    "subject": "Не вижу экспорт отчетов",
+    "status": "open",
+    "messages": [
+      "В документации есть экспорт, но в приложении кнопки нет"
+    ],
+    "metadata": {
+      "platform": "Web",
+      "appVersion": "2.0.0",
+      "feature": "reports_export"
+    }
+  }
+]
