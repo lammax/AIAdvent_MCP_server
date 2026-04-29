@@ -114,6 +114,24 @@ func makeGitHubMCPServer(
                         "type": .string("object"),
                         "properties": .object([:])
                     ])
+                ),
+
+                Tool(
+                    name: "git_changed_files",
+                    description: "Get changed files for the configured local project repository.",
+                    inputSchema: .object([
+                        "type": .string("object"),
+                        "properties": .object([:])
+                    ])
+                ),
+
+                Tool(
+                    name: "git_diff",
+                    description: "Get staged and unstaged diff for the configured local project repository.",
+                    inputSchema: .object([
+                        "type": .string("object"),
+                        "properties": .object([:])
+                    ])
                 )
             ]
         )
@@ -278,6 +296,65 @@ func makeGitHubMCPServer(
                 )
             }
 
+        case "git_changed_files":
+            guard let projectRoot else {
+                return .init(
+                    content: [.text(text: "Project root is not configured. Set PROJECT_ROOT or pass --project-root.", annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
+
+            do {
+                let branch = try currentGitBranch(projectRoot: projectRoot)
+                let files = try changedGitFiles(projectRoot: projectRoot)
+                let payload = GitChangedFilesResult(
+                    branch: branch,
+                    repository: projectRoot.lastPathComponent,
+                    files: files
+                )
+                let data = try JSONEncoder().encode(payload)
+                let json = String(data: data, encoding: .utf8) ?? "{}"
+
+                return .init(
+                    content: [.text(text: json, annotations: nil, _meta: nil)],
+                    isError: false
+                )
+            } catch {
+                return .init(
+                    content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
+
+        case "git_diff":
+            guard let projectRoot else {
+                return .init(
+                    content: [.text(text: "Project root is not configured. Set PROJECT_ROOT or pass --project-root.", annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
+
+            do {
+                let branch = try currentGitBranch(projectRoot: projectRoot)
+                let payload = GitDiffResult(
+                    branch: branch,
+                    repository: projectRoot.lastPathComponent,
+                    diff: try currentGitDiff(projectRoot: projectRoot)
+                )
+                let data = try JSONEncoder().encode(payload)
+                let json = String(data: data, encoding: .utf8) ?? "{}"
+
+                return .init(
+                    content: [.text(text: json, annotations: nil, _meta: nil)],
+                    isError: false
+                )
+            } catch {
+                return .init(
+                    content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
+                    isError: true
+                )
+            }
+
         default:
             return .init(
                 content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
@@ -312,13 +389,106 @@ private struct GitCurrentBranchResult: Encodable {
     let repository: String
 }
 
+private struct GitChangedFilesResult: Encodable {
+    let branch: String
+    let repository: String
+    let files: [GitChangedFile]
+}
+
+private struct GitChangedFile: Encodable {
+    let path: String
+    let status: String
+}
+
+private struct GitDiffResult: Encodable {
+    let branch: String
+    let repository: String
+    let diff: String
+}
+
 private func currentGitBranch(projectRoot: URL) throws -> String {
+    let branch = try runGitCommand(["rev-parse", "--abbrev-ref", "HEAD"], projectRoot: projectRoot)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !branch.isEmpty else {
+        throw NSError(
+            domain: "GitHubMCPServer.Git",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Unable to read current git branch."]
+        )
+    }
+
+    return branch
+}
+
+private func changedGitFiles(projectRoot: URL) throws -> [GitChangedFile] {
+    let output = try runGitCommand(["status", "--porcelain=v1"], projectRoot: projectRoot)
+    return output
+        .split(separator: "\n", omittingEmptySubsequences: true)
+        .compactMap { line -> GitChangedFile? in
+            guard line.count >= 4 else { return nil }
+
+            let rawStatus = String(line.prefix(2))
+            let rawPath = String(line.dropFirst(3))
+            let path = rawPath.components(separatedBy: " -> ").last ?? rawPath
+
+            return GitChangedFile(
+                path: path,
+                status: gitStatusDescription(rawStatus)
+            )
+        }
+}
+
+private func currentGitDiff(projectRoot: URL) throws -> String {
+    let staged = try runGitCommand(["diff", "--cached", "--no-ext-diff", "--"], projectRoot: projectRoot)
+    let unstaged = try runGitCommand(["diff", "--no-ext-diff", "--"], projectRoot: projectRoot)
+    var sections: [String] = []
+
+    if !staged.isEmpty {
+        sections.append("Staged diff:\n\(staged)")
+    }
+
+    if !unstaged.isEmpty {
+        sections.append("Unstaged diff:\n\(unstaged)")
+    }
+
+    return sections.joined(separator: "\n\n")
+}
+
+private func gitStatusDescription(_ status: String) -> String {
+    if status == "??" {
+        return "untracked"
+    }
+
+    if status.contains("A") {
+        return "added"
+    }
+
+    if status.contains("D") {
+        return "deleted"
+    }
+
+    if status.contains("R") {
+        return "renamed"
+    }
+
+    if status.contains("C") {
+        return "copied"
+    }
+
+    if status.contains("M") {
+        return "modified"
+    }
+
+    return status.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func runGitCommand(_ arguments: [String], projectRoot: URL) throws -> String {
     let process = Process()
     let output = Pipe()
     let errorOutput = Pipe()
 
     process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-    process.arguments = ["rev-parse", "--abbrev-ref", "HEAD"]
+    process.arguments = arguments
     process.currentDirectoryURL = projectRoot
     process.standardOutput = output
     process.standardError = errorOutput
@@ -328,21 +498,19 @@ private func currentGitBranch(projectRoot: URL) throws -> String {
 
     let outputData = output.fileHandleForReading.readDataToEndOfFile()
     let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
-    let branch = String(data: outputData, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        ?? ""
+    let text = String(data: outputData, encoding: .utf8) ?? ""
 
-    guard process.terminationStatus == 0, !branch.isEmpty else {
+    guard process.terminationStatus == 0 else {
         let message = String(data: errorData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         throw NSError(
             domain: "GitHubMCPServer.Git",
             code: Int(process.terminationStatus),
-            userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "Unable to read current git branch."]
+            userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "Unable to run git command."]
         )
     }
 
-    return branch
+    return text
 }
 
 private struct GitHubMCPRuntimeConfiguration {
