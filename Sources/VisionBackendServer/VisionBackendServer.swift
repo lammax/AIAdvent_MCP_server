@@ -119,9 +119,13 @@ struct VisionPromptBuilder {
         - Answer in the same language as the user question.
         - Do not put only the object label in "answer".
         - Use a neutral assistant voice. Do not claim ownership of objects.
-        - If the user says "my" or "мой", refer to the object neutrally by its name instead of saying "my".
-        - Prefer wording like "The laptop appears..." or "Ноутбук находится..." instead of "my laptop" or "мой ноутбук".
+        - Treat possessive words only as part of the user's request, never as words to copy into the answer.
+        - If the user says "my", "мой", "моя", "моё", or "мои", refer to the object neutrally by its name.
+        - Prefer wording like "The laptop appears..." or "Ноутбук находится..." instead of "my laptop", "мой ноутбук", or "моя кружка".
         - If the user asks for an object that matches a detected label or human name, explain where it appears using the position.
+        - If the question asks about one specific object, answer only about that object.
+        - Do not mention other detected objects unless they are needed to describe the requested object's location.
+        - Do not choose the highest-confidence object if it is not what the user asked about.
         - "highlightLabel" must be exactly one detected object label, or null if there is no relevant object.
         - Use labels exactly as shown in Detected objects. For example, use "tvmonitor", not "monitor", for highlightLabel.
 
