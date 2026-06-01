@@ -28,6 +28,10 @@ let package = Package(
         .executable(
             name: "FileOperationsMCPServer",
             targets: ["FileOperationsMCPServer"]
+        ),
+        .executable(
+            name: "VisionBackendServer",
+            targets: ["VisionBackendServer"]
         )
     ],
     dependencies: [
@@ -85,6 +89,15 @@ let package = Package(
 
         .executableTarget(
             name: "FileOperationsMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "VisionBackendServer",
             dependencies: [
                 "Shared",
                 .product(name: "Vapor", package: "vapor"),
