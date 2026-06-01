@@ -85,12 +85,13 @@ struct VisionPromptBuilder {
         let objectLines = scene.objects
             .enumerated()
             .map { index, object in
-                "\(index + 1). \(object.label), confidence \(formattedConfidence(object.confidence)), position: \(positionDescription(for: object.boundingBox))"
+                "\(index + 1). label: \(object.label), human name: \(humanName(for: object.label)), confidence: \(formattedConfidence(object.confidence)), position: \(positionDescription(for: object.boundingBox))"
             }
             .joined(separator: "\n")
 
         return """
         You are AIChallenge Vision Assistant.
+        You answer questions about objects detected by an iPhone AR camera.
 
         User question:
         \(question)
@@ -98,16 +99,42 @@ struct VisionPromptBuilder {
         Detected objects:
         \(objectLines.isEmpty ? "No objects detected." : objectLines)
 
-        Return strict JSON only:
+        Rules:
+        - Return strict JSON only. No Markdown. No extra prose.
+        - The answer must be a short, useful human sentence.
+        - Answer in the same language as the user question.
+        - Do not put only the object label in "answer".
+        - If the user asks for an object that matches a detected label or human name, explain where it appears using the position.
+        - "highlightLabel" must be exactly one detected object label, or null if there is no relevant object.
+        - Use labels exactly as shown in Detected objects. For example, use "tvmonitor", not "monitor", for highlightLabel.
+
+        JSON schema:
         {
-          "answer": "...",
-          "highlightLabel": "object label or null"
+          "answer": "Brief human answer.",
+          "highlightLabel": "exact detected label or null"
         }
         """
     }
 
     private func formattedConfidence(_ confidence: Float) -> String {
         String(format: "%.2f", confidence)
+    }
+
+    private func humanName(for label: String) -> String {
+        switch label.lowercased() {
+        case "tvmonitor":
+            return "monitor, screen, display, монитор, экран"
+        case "cell phone":
+            return "phone, smartphone, телефон"
+        case "keyboard":
+            return "keyboard, клавиатура"
+        case "mouse":
+            return "mouse, мышь"
+        case "laptop":
+            return "laptop, notebook, ноутбук"
+        default:
+            return label
+        }
     }
 
     private func positionDescription(for boundingBox: VisionBoundingBox?) -> String {
@@ -298,6 +325,46 @@ private func requiredString(_ key: String, from arguments: [String: Value]?) thr
     return value
 }
 
+private func prettyJSONString<T: Encodable>(_ value: T) -> String {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+    guard let data = try? encoder.encode(value),
+          let json = String(data: data, encoding: .utf8) else {
+        return "<failed to encode JSON>"
+    }
+
+    return json
+}
+
+private func requestBodyString(from request: Vapor.Request) -> String {
+    guard let body = request.body.data else {
+        return "<empty body>"
+    }
+
+    let data = Data(buffer: body)
+    return String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
+}
+
+private func sceneSummary(_ scene: VisionScene) -> String {
+    let objects = scene.objects
+        .map { object in
+            "\(object.label)(\(Int(object.confidence * 100))%, \(positionDescription(for: object.boundingBox)))"
+        }
+        .joined(separator: ", ")
+
+    return objects.isEmpty ? "objects: none" : "objects: \(objects)"
+}
+
+private func positionDescription(for boundingBox: VisionBoundingBox?) -> String {
+    guard let boundingBox else {
+        return "unknown"
+    }
+
+    return "x:\(String(format: "%.2f", boundingBox.x)) y:\(String(format: "%.2f", boundingBox.y)) w:\(String(format: "%.2f", boundingBox.width)) h:\(String(format: "%.2f", boundingBox.height))"
+}
+
 // MARK: - Runtime
 
 struct VisionBackendRuntimeConfiguration {
@@ -361,8 +428,23 @@ enum VisionBackendServer {
         }
 
         app.post("vision", "ask") { req async throws -> VisionAskResponse in
-            let request = try req.content.decode(VisionAskRequest.self)
-            return await reasoningService.ask(request)
+            let rawRequestBody = requestBodyString(from: req)
+            req.logger.info("Vision request body:\n\(rawRequestBody)")
+
+            let request: VisionAskRequest
+            do {
+                request = try req.content.decode(VisionAskRequest.self)
+            } catch {
+                req.logger.warning("Vision request decode failed: \(error.localizedDescription)")
+                throw error
+            }
+
+            req.logger.info("Vision question: \(request.question)")
+            req.logger.info("Vision scene summary: \(sceneSummary(request.scene))")
+
+            let response = await reasoningService.ask(request)
+            req.logger.info("Vision response body:\n\(prettyJSONString(response))")
+            return response
         }
 
         app.on(.POST, "mcp") { req async throws -> Vapor.Response in
