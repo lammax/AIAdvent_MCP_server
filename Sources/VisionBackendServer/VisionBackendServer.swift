@@ -37,12 +37,18 @@ struct VisionAskResponse: Content, Codable, Equatable {
     let highlightLabel: String?
 }
 
+struct VisionReasoningResult: Sendable {
+    let response: VisionAskResponse
+    let source: String
+    let model: String?
+}
+
 // MARK: - Reasoning
 
 struct VisionReasoningService: Sendable {
     let ollamaClient: OllamaVisionClient?
 
-    func ask(_ request: VisionAskRequest) async -> VisionAskResponse {
+    func ask(_ request: VisionAskRequest) async -> VisionReasoningResult {
         let prompt = VisionPromptBuilder().buildPrompt(
             question: request.question,
             scene: request.scene
@@ -50,13 +56,21 @@ struct VisionReasoningService: Sendable {
 
         if let ollamaClient {
             do {
-                return try await ollamaClient.ask(prompt: prompt)
+                return VisionReasoningResult(
+                    response: try await ollamaClient.ask(prompt: prompt),
+                    source: "ollama",
+                    model: ollamaClient.model
+                )
             } catch {
                 // Keep the mobile demo usable when Ollama is offline or returns malformed JSON.
             }
         }
 
-        return deterministicResponse(for: request)
+        return VisionReasoningResult(
+            response: deterministicResponse(for: request),
+            source: "deterministic-fallback",
+            model: nil
+        )
     }
 
     private func deterministicResponse(for request: VisionAskRequest) -> VisionAskResponse {
@@ -104,6 +118,9 @@ struct VisionPromptBuilder {
         - The answer must be a short, useful human sentence.
         - Answer in the same language as the user question.
         - Do not put only the object label in "answer".
+        - Use a neutral assistant voice. Do not claim ownership of objects.
+        - If the user says "my" or "мой", refer to the object neutrally by its name instead of saying "my".
+        - Prefer wording like "The laptop appears..." or "Ноутбук находится..." instead of "my laptop" or "мой ноутбук".
         - If the user asks for an object that matches a detected label or human name, explain where it appears using the position.
         - "highlightLabel" must be exactly one detected object label, or null if there is no relevant object.
         - Use labels exactly as shown in Detected objects. For example, use "tvmonitor", not "monitor", for highlightLabel.
@@ -146,26 +163,34 @@ struct VisionPromptBuilder {
         let centerY = boundingBox.y + boundingBox.height / 2
 
         let horizontal: String
+        let russianHorizontal: String
         switch centerX {
         case ..<0.33:
             horizontal = "left"
+            russianHorizontal = "левой"
         case 0.33..<0.66:
             horizontal = "center"
+            russianHorizontal = "центральной"
         default:
             horizontal = "right"
+            russianHorizontal = "правой"
         }
 
         let vertical: String
+        let russianVertical: String
         switch centerY {
         case ..<0.33:
-            vertical = "top"
+            vertical = "upper"
+            russianVertical = "верхней"
         case 0.33..<0.66:
             vertical = "middle"
+            russianVertical = "средней"
         default:
-            vertical = "bottom"
+            vertical = "lower"
+            russianVertical = "нижней"
         }
 
-        return "\(horizontal)-\(vertical)"
+        return "\(vertical) \(horizontal) of the camera view / в \(russianVertical) \(russianHorizontal) части кадра"
     }
 }
 
@@ -293,8 +318,8 @@ func makeVisionMCPServer(reasoningService: VisionReasoningService) async -> MCP.
             let question = try requiredString("question", from: params.arguments)
             let sceneJSON = try requiredString("scene_json", from: params.arguments)
             let scene = try JSONDecoder().decode(VisionScene.self, from: Data(sceneJSON.utf8))
-            let response = await reasoningService.ask(VisionAskRequest(question: question, scene: scene))
-            return try jsonToolResult(response)
+            let result = await reasoningService.ask(VisionAskRequest(question: question, scene: scene))
+            return try jsonToolResult(result.response)
         } catch {
             return .init(
                 content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
@@ -428,6 +453,7 @@ enum VisionBackendServer {
         }
 
         app.post("vision", "ask") { req async throws -> VisionAskResponse in
+            let startedAt = Date()
             let rawRequestBody = requestBodyString(from: req)
             req.logger.info("Vision request body:\n\(rawRequestBody)")
 
@@ -442,9 +468,13 @@ enum VisionBackendServer {
             req.logger.info("Vision question: \(request.question)")
             req.logger.info("Vision scene summary: \(sceneSummary(request.scene))")
 
-            let response = await reasoningService.ask(request)
-            req.logger.info("Vision response body:\n\(prettyJSONString(response))")
-            return response
+            let result = await reasoningService.ask(request)
+            let elapsed = Date().timeIntervalSince(startedAt)
+            let modelDescription = result.model.map { " \($0)" } ?? ""
+
+            req.logger.info("Vision reasoning source: \(result.source)\(modelDescription), duration: \(String(format: "%.2fs", elapsed))")
+            req.logger.info("Vision response body:\n\(prettyJSONString(result.response))")
+            return result.response
         }
 
         app.on(.POST, "mcp") { req async throws -> Vapor.Response in
