@@ -483,6 +483,7 @@ private func gitStatusDescription(_ status: String) -> String {
 }
 
 private func runGitCommand(_ arguments: [String], projectRoot: URL) throws -> String {
+    #if os(macOS)
     let process = Process()
     let output = Pipe()
     let errorOutput = Pipe()
@@ -511,6 +512,13 @@ private func runGitCommand(_ arguments: [String], projectRoot: URL) throws -> St
     }
 
     return text
+    #else
+    throw NSError(
+        domain: "GitHubMCPServer.Git",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Local git commands are only available on macOS."]
+    )
+    #endif
 }
 
 private struct GitHubMCPRuntimeConfiguration {
