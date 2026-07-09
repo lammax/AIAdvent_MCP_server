@@ -32,6 +32,10 @@ let package = Package(
         .executable(
             name: "VisionBackendServer",
             targets: ["VisionBackendServer"]
+        ),
+        .executable(
+            name: "LocalLLMMCPServer",
+            targets: ["LocalLLMMCPServer"]
         )
     ],
     dependencies: [
@@ -98,6 +102,15 @@ let package = Package(
 
         .executableTarget(
             name: "VisionBackendServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "LocalLLMMCPServer",
             dependencies: [
                 "Shared",
                 .product(name: "Vapor", package: "vapor"),
