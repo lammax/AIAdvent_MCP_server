@@ -37,6 +37,10 @@ let package = Package(
         .executable(
             name: "LocalLLMMCPServer",
             targets: ["LocalLLMMCPServer"]
+        ),
+        .executable(
+            name: "DeveloperToolsMCPServer",
+            targets: ["DeveloperToolsMCPServer"]
         )
     ],
     dependencies: [
@@ -112,6 +116,15 @@ let package = Package(
 
         .executableTarget(
             name: "LocalLLMMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "DeveloperToolsMCPServer",
             dependencies: [
                 "Shared",
                 .product(name: "Vapor", package: "vapor"),
