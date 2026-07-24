@@ -427,13 +427,15 @@ private func makeMobileAutomationMCPServer(
             }
             var upstreamArguments = params.arguments ?? [:]
             let projectRootPath = upstreamArguments.removeValue(forKey: "project_root")?.stringValue
+            let artifactName = upstreamArguments.removeValue(forKey: "artifactName")?.stringValue
             let result = try await bridge.callTool(
                 name: params.name,
                 arguments: upstreamArguments
             )
             return try persistImageArtifacts(
                 from: result,
-                projectRootPath: projectRootPath
+                projectRootPath: projectRootPath,
+                artifactName: artifactName
             )
         } catch {
             return .init(
@@ -448,7 +450,8 @@ private func makeMobileAutomationMCPServer(
 
 private func persistImageArtifacts(
     from result: CallTool.Result,
-    projectRootPath: String?
+    projectRootPath: String?,
+    artifactName: String?
 ) throws -> CallTool.Result {
     guard let projectRootPath else {
         return result
@@ -478,14 +481,24 @@ private func persistImageArtifacts(
             at: artifactsDirectory,
             withIntermediateDirectories: true
         )
+        let requestedName = artifactName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let artifactLabel = requestedName.flatMap {
+            $0.isEmpty ? nil : $0
+        } ?? "Mobile screenshot"
+        let fileName = requestedName.flatMap {
+            $0.isEmpty ? nil : safeArtifactName($0)
+        }
+            .map { "\($0)-\(UUID().uuidString.lowercased())" }
+            ?? UUID().uuidString
         let artifactURL = artifactsDirectory
-            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent(fileName)
             .appendingPathExtension(fileExtension(for: mimeType))
         try imageData.write(to: artifactURL, options: .atomic)
 
         let marker = WorkHarnessArtifactMarker(
             workharnessArtifact: .init(
-                name: "Mobile screenshot",
+                name: artifactLabel,
                 kind: "screenshot",
                 path: artifactURL.path,
                 mimeType: mimeType
@@ -495,6 +508,20 @@ private func persistImageArtifacts(
         content.append(.text(text: markerJSON, annotations: nil, _meta: nil))
     }
     return .init(content: content, isError: result.isError)
+}
+
+private func safeArtifactName(_ value: String) -> String? {
+    let scalars = value.lowercased().unicodeScalars.map { scalar -> Character in
+        if CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_" {
+            return Character(String(scalar))
+        }
+        return "-"
+    }
+    let normalized = String(scalars)
+        .split(separator: "-", omittingEmptySubsequences: true)
+        .joined(separator: "-")
+    guard !normalized.isEmpty else { return nil }
+    return String(normalized.prefix(80))
 }
 
 private func fileExtension(for mimeType: String) -> String {
