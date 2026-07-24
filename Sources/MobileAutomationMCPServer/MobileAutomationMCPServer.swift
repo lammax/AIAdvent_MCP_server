@@ -25,6 +25,25 @@ private enum MobileAutomationError: LocalizedError {
     }
 }
 
+private enum DiagnosticStatus: String, Codable {
+    case ready
+    case warning
+    case unavailable
+}
+
+private struct DiagnosticCheck: Codable {
+    let id: String
+    let title: String
+    let status: DiagnosticStatus
+    let message: String
+    let remediation: String?
+}
+
+private struct DiagnosticReport: Codable {
+    let checkedAt: Date
+    let checks: [DiagnosticCheck]
+}
+
 private actor ClaudeInMobileMCPBridge {
     private var client: MCP.Client?
     private var process: Process?
@@ -49,6 +68,10 @@ private actor ClaudeInMobileMCPBridge {
         let client = try await connectedClient()
         let result = try await client.callTool(name: name, arguments: arguments)
         return .init(content: result.content, isError: result.isError)
+    }
+
+    func diagnostics() async -> DiagnosticReport {
+        await Self.makeDiagnostics()
     }
 
     private func connectedClient() async throws -> MCP.Client {
@@ -159,6 +182,151 @@ private actor ClaudeInMobileMCPBridge {
         ].first(where: FileManager.default.isExecutableFile(atPath:))
             ?? "/opt/homebrew/bin/npx"
     }
+
+    private static func makeDiagnostics() async -> DiagnosticReport {
+        let configuration = try? configuration()
+        let commandPath = configuration?.executableURL.path ?? defaultNPXPath()
+        let commandAvailable = FileManager.default.isExecutableFile(atPath: commandPath)
+        let packageAvailable = cachedClaudeInMobilePackageAvailable()
+
+        let xcode = await runCommand("/usr/bin/xcodebuild", ["-version"])
+        let simctl = await runCommand(
+            "/usr/bin/xcrun",
+            ["simctl", "list", "devices", "booted", "--json"]
+        )
+        let simulatorBooted = simctl.exitCode == 0
+            && simctl.output.replacingOccurrences(of: " ", with: "").contains(#""state":"Booted""#)
+        let appiumPath = executablePath(candidates: [
+            "/opt/homebrew/bin/appium",
+            "/usr/local/bin/appium",
+            "/usr/bin/appium"
+        ])
+        let wdaPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                ".appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent",
+                isDirectory: true
+            ).path
+        let wdaAvailable = FileManager.default.fileExists(atPath: wdaPath)
+
+        return DiagnosticReport(
+            checkedAt: Date(),
+            checks: [
+                DiagnosticCheck(
+                    id: "bridgeCommand",
+                    title: "MCP bridge command",
+                    status: commandAvailable ? .ready : .unavailable,
+                    message: commandAvailable ? commandPath : "Executable not found at \(commandPath).",
+                    remediation: commandAvailable ? nil : "Install Node.js/npm or configure CLAUDE_IN_MOBILE_MCP_COMMAND."
+                ),
+                DiagnosticCheck(
+                    id: "claudeInMobile",
+                    title: "Claude in Mobile",
+                    status: packageAvailable ? .ready : .unavailable,
+                    message: packageAvailable ? "Package is available in the local npm cache." : "Package is not installed in the local npm cache.",
+                    remediation: packageAvailable ? nil : "Install Claude in Mobile explicitly before running smoke tests."
+                ),
+                DiagnosticCheck(
+                    id: "xcode",
+                    title: "Xcode",
+                    status: xcode.exitCode == 0 ? .ready : .unavailable,
+                    message: xcode.exitCode == 0
+                        ? xcode.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        : xcode.error,
+                    remediation: xcode.exitCode == 0 ? nil : "Install/select Xcode and accept its license."
+                ),
+                DiagnosticCheck(
+                    id: "simulator",
+                    title: "iOS Simulator",
+                    status: simulatorBooted ? .ready : .warning,
+                    message: simulatorBooted ? "A booted iOS Simulator is available." : "No booted iOS Simulator was found.",
+                    remediation: simulatorBooted ? nil : "Start the simulator selected by the Testing target before a smoke run."
+                ),
+                DiagnosticCheck(
+                    id: "appium",
+                    title: "Appium",
+                    status: appiumPath == nil ? .warning : .ready,
+                    message: appiumPath ?? "Appium executable was not found.",
+                    remediation: appiumPath == nil ? "Install Appium when full iOS UI inspection is required." : nil
+                ),
+                DiagnosticCheck(
+                    id: "webDriverAgent",
+                    title: "WebDriverAgent",
+                    status: wdaAvailable ? .ready : .warning,
+                    message: wdaAvailable ? wdaPath : "Appium WebDriverAgent was not found.",
+                    remediation: wdaAvailable ? nil : "Install the Appium xcuitest driver; WDA will be built on first use."
+                )
+            ]
+        )
+    }
+
+    private static func executablePath(candidates: [String]) -> String? {
+        candidates.first(where: FileManager.default.isExecutableFile(atPath:))
+    }
+
+    private static func cachedClaudeInMobilePackageAvailable() -> Bool {
+        let npxDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".npm/_npx", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: npxDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return false
+        }
+        for case let fileURL as URL in enumerator
+        where fileURL.lastPathComponent == "package.json"
+            && fileURL.deletingLastPathComponent().lastPathComponent == "claude-in-mobile" {
+            return true
+        }
+        return false
+    }
+
+    private static func runCommand(
+        _ executablePath: String,
+        _ arguments: [String]
+    ) async -> (exitCode: Int32, output: String, error: String) {
+        guard FileManager.default.isExecutableFile(atPath: executablePath) else {
+            return (-1, "", "Executable not found: \(executablePath)")
+        }
+        return await Task.detached {
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MobileAutomationDiagnostics-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(
+                at: temporaryDirectory,
+                withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+            let outputURL = temporaryDirectory.appendingPathComponent("stdout")
+            let errorURL = temporaryDirectory.appendingPathComponent("stderr")
+            FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+            FileManager.default.createFile(atPath: errorURL.path, contents: nil)
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executablePath)
+            process.arguments = arguments
+            do {
+                let output = try FileHandle(forWritingTo: outputURL)
+                let error = try FileHandle(forWritingTo: errorURL)
+                defer {
+                    try? output.close()
+                    try? error.close()
+                }
+                process.standardOutput = output
+                process.standardError = error
+                try process.run()
+                process.waitUntilExit()
+                try output.synchronize()
+                try error.synchronize()
+                return (
+                    process.terminationStatus,
+                    String(decoding: (try? Data(contentsOf: outputURL)) ?? Data(), as: UTF8.self),
+                    String(decoding: (try? Data(contentsOf: errorURL)) ?? Data(), as: UTF8.self)
+                )
+            } catch {
+                return (-1, "", error.localizedDescription)
+            }
+        }.value
+    }
 }
 
 private func makeMobileAutomationMCPServer(
@@ -171,15 +339,43 @@ private func makeMobileAutomationMCPServer(
     )
 
     await server.withMethodHandler(ListTools.self) { _ in
-        do {
-            return .init(tools: try await bridge.listTools())
-        } catch {
-            return .init(tools: [])
+        let healthTool = Tool(
+            name: "workharness_health",
+            description: "Check Claude in Mobile, Xcode, Simulator, Appium, and WebDriverAgent availability.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([:])
+            ])
+        )
+        let actionSchema: Value = .object([
+            "type": .string("object"),
+            "properties": .object([
+                "action": .object(["type": .string("string")])
+            ]),
+            "required": .array([.string("action")])
+        ])
+        let proxiedTools = ["device", "app", "screen", "ui", "input"].map {
+            Tool(
+                name: $0,
+                description: "Proxied Claude in Mobile \($0) meta-tool.",
+                inputSchema: actionSchema
+            )
         }
+        return .init(tools: [healthTool] + proxiedTools)
     }
 
     await server.withMethodHandler(CallTool.self) { params in
         do {
+            if params.name == "workharness_health" {
+                let report = await bridge.diagnostics()
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let json = String(decoding: try encoder.encode(report), as: UTF8.self)
+                return .init(
+                    content: [.text(text: json, annotations: nil, _meta: nil)],
+                    isError: false
+                )
+            }
             return try await bridge.callTool(
                 name: params.name,
                 arguments: params.arguments
