@@ -7,7 +7,9 @@ internal import NIOFoundationCompat
 
 private enum MobileAutomationError: LocalizedError {
     case executableNotFound(String)
+    case invalidImageData
     case invalidArgumentsConfiguration
+    case invalidProjectRoot(String)
     case upstreamStartupTimedOut
     case upstreamUnavailable
 
@@ -15,8 +17,12 @@ private enum MobileAutomationError: LocalizedError {
         switch self {
         case .executableNotFound(let path):
             "Claude in Mobile MCP executable was not found or is not executable: \(path)"
+        case .invalidImageData:
+            "Claude in Mobile returned invalid base64 image data."
         case .invalidArgumentsConfiguration:
             "CLAUDE_IN_MOBILE_MCP_ARGUMENTS_JSON must be a JSON array of strings."
+        case .invalidProjectRoot(let path):
+            "The WorkHarness project root is not a directory: \(path)"
         case .upstreamStartupTimedOut:
             "Claude in Mobile MCP did not complete its MCP handshake within 10 seconds."
         case .upstreamUnavailable:
@@ -42,6 +48,17 @@ private struct DiagnosticCheck: Codable {
 private struct DiagnosticReport: Codable {
     let checkedAt: Date
     let checks: [DiagnosticCheck]
+}
+
+private struct WorkHarnessArtifactMarker: Codable {
+    struct Artifact: Codable {
+        let name: String
+        let kind: String
+        let path: String
+        let mimeType: String
+    }
+
+    let workharnessArtifact: Artifact
 }
 
 private actor ClaudeInMobileMCPBridge {
@@ -376,9 +393,15 @@ private func makeMobileAutomationMCPServer(
                     isError: false
                 )
             }
-            return try await bridge.callTool(
+            var upstreamArguments = params.arguments ?? [:]
+            let projectRootPath = upstreamArguments.removeValue(forKey: "project_root")?.stringValue
+            let result = try await bridge.callTool(
                 name: params.name,
-                arguments: params.arguments
+                arguments: upstreamArguments
+            )
+            return try persistImageArtifacts(
+                from: result,
+                projectRootPath: projectRootPath
             )
         } catch {
             return .init(
@@ -389,6 +412,70 @@ private func makeMobileAutomationMCPServer(
     }
 
     return server
+}
+
+private func persistImageArtifacts(
+    from result: CallTool.Result,
+    projectRootPath: String?
+) throws -> CallTool.Result {
+    guard let projectRootPath else {
+        return result
+    }
+
+    let projectRoot = URL(fileURLWithPath: projectRootPath, isDirectory: true)
+        .standardizedFileURL
+        .resolvingSymlinksInPath()
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: projectRoot.path, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
+        throw MobileAutomationError.invalidProjectRoot(projectRootPath)
+    }
+
+    var content = result.content
+    for item in result.content {
+        guard case let .image(data, mimeType, _, _) = item else {
+            continue
+        }
+        guard let imageData = Data(base64Encoded: data, options: .ignoreUnknownCharacters) else {
+            throw MobileAutomationError.invalidImageData
+        }
+
+        let artifactsDirectory = projectRoot
+            .appendingPathComponent(".workharness/testing/reports/artifacts", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: artifactsDirectory,
+            withIntermediateDirectories: true
+        )
+        let artifactURL = artifactsDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(fileExtension(for: mimeType))
+        try imageData.write(to: artifactURL, options: .atomic)
+
+        let marker = WorkHarnessArtifactMarker(
+            workharnessArtifact: .init(
+                name: "Mobile screenshot",
+                kind: "screenshot",
+                path: artifactURL.path,
+                mimeType: mimeType
+            )
+        )
+        let markerJSON = String(decoding: try JSONEncoder().encode(marker), as: UTF8.self)
+        content.append(.text(text: markerJSON, annotations: nil, _meta: nil))
+    }
+    return .init(content: content, isError: result.isError)
+}
+
+private func fileExtension(for mimeType: String) -> String {
+    switch mimeType.lowercased() {
+    case "image/jpeg":
+        "jpg"
+    case "image/webp":
+        "webp"
+    case "image/heic", "image/heif":
+        "heic"
+    default:
+        "png"
+    }
 }
 
 @main
