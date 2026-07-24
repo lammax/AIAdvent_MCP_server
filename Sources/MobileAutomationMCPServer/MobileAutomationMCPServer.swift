@@ -173,10 +173,25 @@ private actor ClaudeInMobileMCPBridge {
         arguments: [String]
     ) {
         let environment = ProcessInfo.processInfo.environment
-        let executablePath = environment["CLAUDE_IN_MOBILE_MCP_COMMAND"]
-            ?? defaultNPXPath()
-        let arguments: [String]
+        if let executablePath = environment["CLAUDE_IN_MOBILE_MCP_COMMAND"] {
+            let arguments: [String]
+            if let rawArguments = environment["CLAUDE_IN_MOBILE_MCP_ARGUMENTS_JSON"] {
+                guard let data = rawArguments.data(using: .utf8),
+                      let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+                    throw MobileAutomationError.invalidArgumentsConfiguration
+                }
+                arguments = decoded
+            } else {
+                arguments = []
+            }
+            return (URL(fileURLWithPath: executablePath), arguments)
+        }
 
+        if let executablePath = installedClaudeInMobilePath() {
+            return (URL(fileURLWithPath: executablePath), [])
+        }
+
+        let arguments: [String]
         if let rawArguments = environment["CLAUDE_IN_MOBILE_MCP_ARGUMENTS_JSON"] {
             guard let data = rawArguments.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode([String].self, from: data) else {
@@ -188,7 +203,7 @@ private actor ClaudeInMobileMCPBridge {
             arguments = ["--offline", "claude-in-mobile"]
         }
 
-        return (URL(fileURLWithPath: executablePath), arguments)
+        return (URL(fileURLWithPath: defaultNPXPath()), arguments)
     }
 
     private static func defaultNPXPath() -> String {
@@ -204,7 +219,9 @@ private actor ClaudeInMobileMCPBridge {
         let configuration = try? configuration()
         let commandPath = configuration?.executableURL.path ?? defaultNPXPath()
         let commandAvailable = FileManager.default.isExecutableFile(atPath: commandPath)
-        let packageAvailable = cachedClaudeInMobilePackageAvailable()
+        let installedPackagePath = installedClaudeInMobilePath()
+        let packageAvailable = installedPackagePath != nil
+            || cachedClaudeInMobilePackageAvailable()
 
         let xcode = await runCommand("/usr/bin/xcodebuild", ["-version"])
         let simctl = await runCommand(
@@ -239,8 +256,13 @@ private actor ClaudeInMobileMCPBridge {
                     id: "claudeInMobile",
                     title: "Claude in Mobile",
                     status: packageAvailable ? .ready : .unavailable,
-                    message: packageAvailable ? "Package is available in the local npm cache." : "Package is not installed in the local npm cache.",
-                    remediation: packageAvailable ? nil : "Install Claude in Mobile explicitly before running smoke tests."
+                    message: installedPackagePath
+                        ?? (packageAvailable
+                            ? "Package is available in the local npm cache."
+                            : "Claude in Mobile is not installed."),
+                    remediation: packageAvailable
+                        ? nil
+                        : "Install Claude in Mobile explicitly before running smoke tests."
                 ),
                 DiagnosticCheck(
                     id: "xcode",
@@ -278,6 +300,16 @@ private actor ClaudeInMobileMCPBridge {
 
     private static func executablePath(candidates: [String]) -> String? {
         candidates.first(where: FileManager.default.isExecutableFile(atPath:))
+    }
+
+    private static func installedClaudeInMobilePath() -> String? {
+        executablePath(candidates: [
+            "/opt/homebrew/bin/claude-in-mobile",
+            "/usr/local/bin/claude-in-mobile",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/claude-in-mobile")
+                .path
+        ])
     }
 
     private static func cachedClaudeInMobilePackageAvailable() -> Bool {
