@@ -41,6 +41,10 @@ let package = Package(
         .executable(
             name: "DeveloperToolsMCPServer",
             targets: ["DeveloperToolsMCPServer"]
+        ),
+        .executable(
+            name: "MobileAutomationMCPServer",
+            targets: ["MobileAutomationMCPServer"]
         )
     ],
     dependencies: [
@@ -125,6 +129,15 @@ let package = Package(
 
         .executableTarget(
             name: "DeveloperToolsMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .executableTarget(
+            name: "MobileAutomationMCPServer",
             dependencies: [
                 "Shared",
                 .product(name: "Vapor", package: "vapor"),

@@ -31,6 +31,7 @@ Reference examples:
 
 - `Sources/GitHubMCPServer/GitHubMCPServer.swift`
 - `Sources/FileOperationsMCPServer/FileOperationsMCPServer.swift`
+- `Sources/MobileAutomationMCPServer/MobileAutomationMCPServer.swift`
 - `Sources/RAGMCPServer/RAGMCPServer.swift`
 - `Sources/SupportMCPServer/SupportMCPServer.swift`
 - `Sources/UtilityMCPServer/UtilityMCPServer.swift`
