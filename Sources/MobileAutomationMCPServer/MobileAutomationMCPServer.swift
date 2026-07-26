@@ -91,6 +91,10 @@ private actor ClaudeInMobileMCPBridge {
         await Self.makeDiagnostics(webDriverAgent: webDriverAgent)
     }
 
+    func reset() async {
+        await disconnect()
+    }
+
     private func connectedClient() async throws -> MCP.Client {
         if let client, process?.isRunning == true {
             return client
@@ -108,8 +112,15 @@ private actor ClaudeInMobileMCPBridge {
         let process = Process()
         process.executableURL = configuration.executableURL
         process.arguments = configuration.arguments
+        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         process.environment = ProcessInfo.processInfo.environment.merging([
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path
+            "HOME": homeDirectory.path,
+            "WDA_PATH": homeDirectory
+                .appendingPathComponent(
+                    ".appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent",
+                    isDirectory: true
+                )
+                .path
         ]) { current, _ in current }
         process.standardInput = serverInput
         process.standardOutput = serverOutput
@@ -467,6 +478,7 @@ private func makeMobileAutomationMCPServer(
                     report = try await webDriverAgent.prepare(
                         requestedSimulatorID: params.arguments?["simulator_id"]?.stringValue
                     )
+                    await bridge.reset()
                 case "status":
                     report = await webDriverAgent.status()
                 default:

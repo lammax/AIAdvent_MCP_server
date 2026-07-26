@@ -22,7 +22,6 @@ struct WebDriverAgentReport: Codable {
     let isRunning: Bool
     let managedByServer: Bool
     let simulatorID: String?
-    let endpoint: String
     let message: String
     let logPath: String?
 }
@@ -38,24 +37,18 @@ actor WebDriverAgentController {
         let devices: [String: [Device]]
     }
 
-    private static let endpoint = URL(string: "http://127.0.0.1:8100/status")!
-
     private var preparedSimulatorID: String?
     private var logURL: URL?
 
     func status() async -> WebDriverAgentReport {
-        let running = await Self.isServerReady()
         return WebDriverAgentReport(
             isPrepared: preparedSimulatorID != nil,
-            isRunning: running,
+            isRunning: false,
             managedByServer: false,
             simulatorID: preparedSimulatorID,
-            endpoint: Self.endpoint.absoluteString,
-            message: running
-                ? "WebDriverAgent is running under Claude in Mobile."
-                : (preparedSimulatorID == nil
-                    ? "WebDriverAgent is installed but not prepared."
-                    : "WebDriverAgent is prepared; Claude in Mobile will start it on first UI action."),
+            message: preparedSimulatorID == nil
+                ? "WebDriverAgent is installed but not prepared."
+                : "WebDriverAgent is prepared; Claude in Mobile will start it on the first UI action using its managed port.",
             logPath: logURL?.path
         )
     }
@@ -138,18 +131,6 @@ actor WebDriverAgentController {
         )
         guard bootStatus.exitCode == 0 else {
             throw WebDriverAgentError.preparationFailed(bootStatus.output)
-        }
-    }
-
-    private static func isServerReady() async -> Bool {
-        var request = URLRequest(url: endpoint)
-        request.timeoutInterval = 2
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse else { return false }
-            return (200..<300).contains(response.statusCode)
-        } catch {
-            return false
         }
     }
 
