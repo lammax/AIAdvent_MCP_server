@@ -87,8 +87,8 @@ private actor ClaudeInMobileMCPBridge {
         return .init(content: result.content, isError: result.isError)
     }
 
-    func diagnostics() async -> DiagnosticReport {
-        await Self.makeDiagnostics()
+    func diagnostics(webDriverAgent: WebDriverAgentReport) async -> DiagnosticReport {
+        await Self.makeDiagnostics(webDriverAgent: webDriverAgent)
     }
 
     private func connectedClient() async throws -> MCP.Client {
@@ -215,7 +215,9 @@ private actor ClaudeInMobileMCPBridge {
             ?? "/opt/homebrew/bin/npx"
     }
 
-    private static func makeDiagnostics() async -> DiagnosticReport {
+    private static func makeDiagnostics(
+        webDriverAgent: WebDriverAgentReport
+    ) async -> DiagnosticReport {
         let configuration = try? configuration()
         let commandPath = configuration?.executableURL.path ?? defaultNPXPath()
         let commandAvailable = FileManager.default.isExecutableFile(atPath: commandPath)
@@ -290,9 +292,17 @@ private actor ClaudeInMobileMCPBridge {
                 DiagnosticCheck(
                     id: "webDriverAgent",
                     title: "WebDriverAgent",
-                    status: wdaAvailable ? .ready : .warning,
-                    message: wdaAvailable ? wdaPath : "Appium WebDriverAgent was not found.",
-                    remediation: wdaAvailable ? nil : "Install the Appium xcuitest driver; WDA will be built on first use."
+                    status: webDriverAgent.isRunning ? .ready : (wdaAvailable ? .warning : .unavailable),
+                    message: webDriverAgent.isRunning
+                        ? webDriverAgent.message
+                        : (wdaAvailable
+                            ? "WebDriverAgent is installed but not running."
+                            : "Appium WebDriverAgent was not found."),
+                    remediation: webDriverAgent.isRunning
+                        ? nil
+                        : (wdaAvailable
+                            ? "Call workharness_wda with action ensure_running before UI inspection."
+                            : "Install the Appium xcuitest driver before running smoke tests.")
                 )
             ]
         )
@@ -379,7 +389,8 @@ private actor ClaudeInMobileMCPBridge {
 }
 
 private func makeMobileAutomationMCPServer(
-    bridge: ClaudeInMobileMCPBridge
+    bridge: ClaudeInMobileMCPBridge,
+    webDriverAgent: WebDriverAgentController
 ) async -> MCP.Server {
     let server = Server(
         name: "mobile-automation-mcp-server",
@@ -396,6 +407,27 @@ private func makeMobileAutomationMCPServer(
                 "properties": .object([:])
             ])
         )
+        let webDriverAgentTool = Tool(
+            name: "workharness_wda",
+            description: "Start, inspect, or stop the WebDriverAgent server used for iOS UI automation.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "action": .object([
+                        "type": .string("string"),
+                        "enum": .array([
+                            .string("ensure_running"),
+                            .string("status"),
+                            .string("stop")
+                        ])
+                    ]),
+                    "simulator_id": .object([
+                        "type": .string("string")
+                    ])
+                ]),
+                "required": .array([.string("action")])
+            ])
+        )
         let actionSchema: Value = .object([
             "type": .string("object"),
             "properties": .object([
@@ -410,16 +442,40 @@ private func makeMobileAutomationMCPServer(
                 inputSchema: actionSchema
             )
         }
-        return .init(tools: [healthTool] + proxiedTools)
+        return .init(tools: [healthTool, webDriverAgentTool] + proxiedTools)
     }
 
     await server.withMethodHandler(CallTool.self) { params in
         do {
             if params.name == "workharness_health" {
-                let report = await bridge.diagnostics()
+                let wdaReport = await webDriverAgent.status()
+                let report = await bridge.diagnostics(webDriverAgent: wdaReport)
                 let encoder = JSONEncoder()
                 encoder.dateEncodingStrategy = .iso8601
                 let json = String(decoding: try encoder.encode(report), as: UTF8.self)
+                return .init(
+                    content: [.text(text: json, annotations: nil, _meta: nil)],
+                    isError: false
+                )
+            }
+            if params.name == "workharness_wda" {
+                guard let action = params.arguments?["action"]?.stringValue else {
+                    throw MobileAutomationError.invalidArgumentsConfiguration
+                }
+                let report: WebDriverAgentReport
+                switch action {
+                case "ensure_running":
+                    report = try await webDriverAgent.ensureRunning(
+                        requestedSimulatorID: params.arguments?["simulator_id"]?.stringValue
+                    )
+                case "status":
+                    report = await webDriverAgent.status()
+                case "stop":
+                    report = await webDriverAgent.stop()
+                default:
+                    throw MobileAutomationError.invalidArgumentsConfiguration
+                }
+                let json = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
                 return .init(
                     content: [.text(text: json, annotations: nil, _meta: nil)],
                     isError: false
@@ -552,7 +608,11 @@ enum MobileAutomationMCPServer {
         app.http.server.configuration.port = 3009
 
         let bridge = ClaudeInMobileMCPBridge()
-        let mcpServer = await makeMobileAutomationMCPServer(bridge: bridge)
+        let webDriverAgent = WebDriverAgentController()
+        let mcpServer = await makeMobileAutomationMCPServer(
+            bridge: bridge,
+            webDriverAgent: webDriverAgent
+        )
         let transport = StatelessHTTPServerTransport()
         try await mcpServer.start(transport: transport)
 
