@@ -21,9 +21,9 @@ struct LocalLLMConfiguration: Sendable {
     ) -> LocalLLMConfiguration {
         let host = stringValue("LOCAL_LLM_MCP_HOST", in: environment, defaultValue: "127.0.0.1")
         let port = intValue("LOCAL_LLM_MCP_PORT", in: environment, defaultValue: 3007)
-        let upstreamBaseURL = URL(string: stringValue("LOCAL_LLM_BASE_URL", in: environment, defaultValue: "http://127.0.0.1:8080/v1"))!
-        let apiKey = stringValue("LOCAL_LLM_API_KEY", in: environment, defaultValue: "change-me")
-        let modelAlias = stringValue("LOCAL_LLM_MODEL_ALIAS", in: environment, defaultValue: "local-private")
+        let upstreamBaseURL = URL(string: stringValue("LOCAL_LLM_BASE_URL", in: environment, defaultValue: "http://127.0.0.1:11434/v1"))!
+        let apiKey = stringValue("LOCAL_LLM_API_KEY", in: environment, defaultValue: "ollama")
+        let modelAlias = stringValue("LOCAL_LLM_MODEL_ALIAS", in: environment, defaultValue: "qwen2.5-coder:1.5b")
         let contextSize = intValue("LOCAL_LLM_CONTEXT_TOKENS", in: environment, defaultValue: 16_384)
         let maxGeneratedTokens = intValue("LOCAL_LLM_MAX_OUTPUT_TOKENS", in: environment, defaultValue: 2_048)
 
@@ -97,6 +97,7 @@ struct LocalLLMClient: Sendable {
         let messages: [Message]
         let stream: Bool
         let temperature: Double?
+        let top_p: Double?
         let max_tokens: Int?
     }
 
@@ -114,9 +115,50 @@ struct LocalLLMClient: Sendable {
         let usage: LocalLLMUsage?
     }
 
+    struct ModelsResponse: Decodable {
+        struct Model: Decodable {
+            let id: String
+        }
+
+        let data: [Model]
+    }
+
     let configuration: LocalLLMConfiguration
 
-    func generate(messages: [ProviderLikeMessage], model: String?, temperature: Double?, maxTokens: Int?) async throws -> LocalLLMGenerateResult {
+    func listModels() async throws -> [LocalLLMModelSummary] {
+        var request = URLRequest(url: configuration.upstreamBaseURL.appendingPathComponent("models"))
+        request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LocalLLMError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw LocalLLMError.httpStatus(httpResponse.statusCode, body)
+        }
+
+        return try JSONDecoder().decode(ModelsResponse.self, from: data).data
+            .filter { !$0.id.localizedCaseInsensitiveContains("embed") }
+            .map { model in
+            LocalLLMModelSummary(
+                id: model.id,
+                displayName: model.id,
+                provider: "openai-compatible-local",
+                contextWindowTokens: configuration.contextSize,
+                maxOutputTokens: configuration.maxGeneratedTokens,
+                supportsStreaming: false
+            )
+        }
+    }
+
+    func generate(
+        messages: [ProviderLikeMessage],
+        model: String?,
+        temperature: Double?,
+        topP: Double?,
+        maxTokens: Int?
+    ) async throws -> LocalLLMGenerateResult {
         let requestModel = model?.isEmpty == false ? model! : configuration.modelAlias
         let endpoint = configuration.upstreamBaseURL.appendingPathComponent("chat/completions")
         var request = URLRequest(url: endpoint)
@@ -128,6 +170,7 @@ struct LocalLLMClient: Sendable {
             messages: messages.map { .init(role: $0.role, content: $0.content) },
             stream: false,
             temperature: temperature,
+            top_p: topP,
             max_tokens: maxTokens ?? configuration.maxGeneratedTokens
         ))
 
@@ -159,6 +202,7 @@ struct LocalLLMClient: Sendable {
                 messages: [.init(role: "user", content: "Return the single word OK.")],
                 model: configuration.modelAlias,
                 temperature: 0,
+                topP: 0.9,
                 maxTokens: 8
             )
             return LocalLLMHealthResult(
@@ -261,6 +305,9 @@ func makeLocalLLMMCPServer(client: LocalLLMClient, configuration: LocalLLMConfig
                             "temperature": .object([
                                 "type": .string("number")
                             ]),
+                            "top_p": .object([
+                                "type": .string("number")
+                            ]),
                             "max_tokens": .object([
                                 "type": .string("integer")
                             ])
@@ -284,16 +331,8 @@ func makeLocalLLMMCPServer(client: LocalLLMClient, configuration: LocalLLMConfig
         do {
             switch params.name {
             case "local_llm_list_models":
-                return try jsonToolResult([
-                    LocalLLMModelSummary(
-                        id: configuration.modelAlias,
-                        displayName: "Local LLM",
-                        provider: "llama.cpp-openai-compatible",
-                        contextWindowTokens: configuration.contextSize,
-                        maxOutputTokens: configuration.maxGeneratedTokens,
-                        supportsStreaming: false
-                    )
-                ])
+                let models = try await client.listModels()
+                return try jsonToolResult(models)
 
             case "local_llm_describe_model":
                 return try jsonToolResult(LocalLLMModelSummary(
@@ -311,6 +350,7 @@ func makeLocalLLMMCPServer(client: LocalLLMClient, configuration: LocalLLMConfig
                     messages: messages,
                     model: stringValue("model", from: params.arguments),
                     temperature: doubleValue("temperature", from: params.arguments),
+                    topP: doubleValue("top_p", from: params.arguments),
                     maxTokens: intValue("max_tokens", from: params.arguments)
                 )
                 return try jsonToolResult(result)
