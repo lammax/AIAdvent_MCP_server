@@ -3,21 +3,22 @@ import Foundation
 enum WebDriverAgentError: LocalizedError {
     case noBootedSimulator
     case notInstalled(String)
-    case startupFailed(String)
+    case preparationFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .noBootedSimulator:
-            "No booted iOS Simulator is available for WebDriverAgent."
+            "No iOS Simulator is available for WebDriverAgent."
         case .notInstalled(let path):
             "WebDriverAgent was not found at \(path). Install the Appium xcuitest driver."
-        case .startupFailed(let details):
-            "WebDriverAgent failed to start. \(details)"
+        case .preparationFailed(let details):
+            "WebDriverAgent preparation failed. \(details)"
         }
     }
 }
 
 struct WebDriverAgentReport: Codable {
+    let isPrepared: Bool
     let isRunning: Bool
     let managedByServer: Bool
     let simulatorID: String?
@@ -38,49 +39,33 @@ actor WebDriverAgentController {
     }
 
     private static let endpoint = URL(string: "http://127.0.0.1:8100/status")!
-    private static let startupTimeout = Duration.seconds(180)
 
-    private var process: Process?
-    private var logHandle: FileHandle?
+    private var preparedSimulatorID: String?
     private var logURL: URL?
-    private var simulatorID: String?
-
-    deinit {
-        if process?.isRunning == true {
-            process?.interrupt()
-        }
-        try? logHandle?.close()
-    }
 
     func status() async -> WebDriverAgentReport {
         let running = await Self.isServerReady()
         return WebDriverAgentReport(
+            isPrepared: preparedSimulatorID != nil,
             isRunning: running,
-            managedByServer: running && process?.isRunning == true,
-            simulatorID: simulatorID,
+            managedByServer: false,
+            simulatorID: preparedSimulatorID,
             endpoint: Self.endpoint.absoluteString,
             message: running
-                ? "WebDriverAgent is accepting requests."
-                : "WebDriverAgent is not accepting requests.",
+                ? "WebDriverAgent is running under Claude in Mobile."
+                : (preparedSimulatorID == nil
+                    ? "WebDriverAgent is installed but not prepared."
+                    : "WebDriverAgent is prepared; Claude in Mobile will start it on first UI action."),
             logPath: logURL?.path
         )
     }
 
-    func ensureRunning(requestedSimulatorID: String?) async throws -> WebDriverAgentReport {
-        if await Self.isServerReady() {
-            return await status()
-        }
-
-        if process?.isRunning == true {
-            return try await waitUntilReady()
-        }
-        cleanupManagedProcess()
-
+    func prepare(requestedSimulatorID: String?) async throws -> WebDriverAgentReport {
         let simulatorID: String
         if let requestedSimulatorID {
             simulatorID = requestedSimulatorID
         } else {
-            simulatorID = try await Self.bootedSimulatorID()
+            simulatorID = try await Self.availableSimulatorID()
         }
         let directory = Self.webDriverAgentDirectory()
         let project = directory.appendingPathComponent("WebDriverAgent.xcodeproj")
@@ -88,15 +73,18 @@ actor WebDriverAgentController {
             throw WebDriverAgentError.notInstalled(directory.path)
         }
 
+        try await Self.bootSimulator(simulatorID)
+
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("workharness-wda-\(UUID().uuidString.lowercased()).log")
+            .appendingPathComponent("workharness-wda-prepare-\(UUID().uuidString.lowercased()).log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let logHandle = try FileHandle(forWritingTo: logURL)
+        defer { try? logHandle.close() }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcodebuild")
         process.arguments = [
-            "test",
+            "build-for-testing",
             "-project", project.lastPathComponent,
             "-scheme", "WebDriverAgentRunner",
             "-destination", "platform=iOS Simulator,id=\(simulatorID)"
@@ -105,78 +93,52 @@ actor WebDriverAgentController {
         process.standardOutput = logHandle
         process.standardError = logHandle
 
-        self.process = process
-        self.logHandle = logHandle
+        try process.run()
+        await Task.detached {
+            process.waitUntilExit()
+        }.value
+        try? logHandle.synchronize()
+
+        guard process.terminationStatus == 0 else {
+            throw WebDriverAgentError.preparationFailed(Self.logTail(at: logURL))
+        }
+
+        preparedSimulatorID = simulatorID
         self.logURL = logURL
-        self.simulatorID = simulatorID
-
-        do {
-            try process.run()
-            return try await waitUntilReady()
-        } catch {
-            let details = logTail()
-            cleanupManagedProcess()
-            if let webDriverAgentError = error as? WebDriverAgentError {
-                throw webDriverAgentError
-            }
-            throw WebDriverAgentError.startupFailed(
-                [error.localizedDescription, details].filter { !$0.isEmpty }.joined(separator: "\n")
-            )
-        }
-    }
-
-    func stop() async -> WebDriverAgentReport {
-        if process?.isRunning == true, let simulatorID {
-            _ = await Self.runCommand(
-                "/usr/bin/xcrun",
-                [
-                    "simctl", "terminate", simulatorID,
-                    "com.facebook.WebDriverAgentRunner.xctrunner"
-                ]
-            )
-            process?.interrupt()
-            for _ in 0..<10 where process?.isRunning == true {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            if process?.isRunning == true {
-                process?.terminate()
-            }
-        }
-        cleanupManagedProcess()
         return await status()
     }
 
-    private func waitUntilReady() async throws -> WebDriverAgentReport {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: Self.startupTimeout)
-        while clock.now < deadline {
-            if await Self.isServerReady() {
-                return await status()
-            }
-            if process?.isRunning != true {
-                throw WebDriverAgentError.startupFailed(logTail())
-            }
-            try await Task.sleep(for: .seconds(1))
-        }
-        throw WebDriverAgentError.startupFailed(
-            "Startup timed out after 180 seconds.\n\(logTail())"
+    private static func availableSimulatorID() async throws -> String {
+        let result = await runCommand(
+            "/usr/bin/xcrun",
+            ["simctl", "list", "devices", "available", "--json"]
         )
-    }
-
-    private func cleanupManagedProcess() {
-        try? logHandle?.close()
-        logHandle = nil
-        process = nil
-        simulatorID = nil
-    }
-
-    private func logTail() -> String {
-        guard let logURL,
-              let data = try? Data(contentsOf: logURL),
-              !data.isEmpty else {
-            return "No WebDriverAgent log output was captured."
+        guard result.exitCode == 0,
+              let data = result.output.data(using: .utf8),
+              let list = try? JSONDecoder().decode(SimulatorList.self, from: data),
+              let simulator = list.devices.values
+                .flatMap({ $0 })
+                .first(where: { $0.isAvailable }) else {
+            throw WebDriverAgentError.noBootedSimulator
         }
-        return String(decoding: data.suffix(8_192), as: UTF8.self)
+        return simulator.udid
+    }
+
+    private static func bootSimulator(_ simulatorID: String) async throws {
+        let boot = await runCommand(
+            "/usr/bin/xcrun",
+            ["simctl", "boot", simulatorID]
+        )
+        guard boot.exitCode == 0 || boot.output.contains("current state: Booted") else {
+            throw WebDriverAgentError.preparationFailed(boot.output)
+        }
+        let bootStatus = await runCommand(
+            "/usr/bin/xcrun",
+            ["simctl", "bootstatus", simulatorID, "-b"]
+        )
+        guard bootStatus.exitCode == 0 else {
+            throw WebDriverAgentError.preparationFailed(bootStatus.output)
+        }
     }
 
     private static func isServerReady() async -> Bool {
@@ -191,28 +153,19 @@ actor WebDriverAgentController {
         }
     }
 
-    private static func bootedSimulatorID() async throws -> String {
-        let result = await runCommand(
-            "/usr/bin/xcrun",
-            ["simctl", "list", "devices", "booted", "--json"]
-        )
-        guard result.exitCode == 0,
-              let data = result.output.data(using: .utf8),
-              let list = try? JSONDecoder().decode(SimulatorList.self, from: data),
-              let simulator = list.devices.values
-                .flatMap({ $0 })
-                .first(where: { $0.state == "Booted" && $0.isAvailable }) else {
-            throw WebDriverAgentError.noBootedSimulator
-        }
-        return simulator.udid
-    }
-
     private static func webDriverAgentDirectory() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(
                 ".appium/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent",
                 isDirectory: true
             )
+    }
+
+    private static func logTail(at url: URL) -> String {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            return "No WebDriverAgent build output was captured."
+        }
+        return String(decoding: data.suffix(8_192), as: UTF8.self)
     }
 
     private static func runCommand(
@@ -225,14 +178,14 @@ actor WebDriverAgentController {
             process.executableURL = URL(fileURLWithPath: executablePath)
             process.arguments = arguments
             process.standardOutput = outputPipe
-            process.standardError = FileHandle.nullDevice
+            process.standardError = outputPipe
             do {
                 try process.run()
                 let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 return (process.terminationStatus, String(decoding: data, as: UTF8.self))
             } catch {
-                return (-1, "")
+                return (-1, error.localizedDescription)
             }
         }.value
     }

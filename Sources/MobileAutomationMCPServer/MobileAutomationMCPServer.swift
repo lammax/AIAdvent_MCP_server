@@ -292,16 +292,16 @@ private actor ClaudeInMobileMCPBridge {
                 DiagnosticCheck(
                     id: "webDriverAgent",
                     title: "WebDriverAgent",
-                    status: webDriverAgent.isRunning ? .ready : (wdaAvailable ? .warning : .unavailable),
-                    message: webDriverAgent.isRunning
+                    status: (webDriverAgent.isPrepared || webDriverAgent.isRunning)
+                        ? .ready
+                        : (wdaAvailable ? .warning : .unavailable),
+                    message: wdaAvailable
                         ? webDriverAgent.message
-                        : (wdaAvailable
-                            ? "WebDriverAgent is installed but not running."
-                            : "Appium WebDriverAgent was not found."),
-                    remediation: webDriverAgent.isRunning
+                        : "Appium WebDriverAgent was not found.",
+                    remediation: (webDriverAgent.isPrepared || webDriverAgent.isRunning)
                         ? nil
                         : (wdaAvailable
-                            ? "Call workharness_wda with action ensure_running before UI inspection."
+                            ? "Call workharness_wda with action prepare before UI inspection."
                             : "Install the Appium xcuitest driver before running smoke tests.")
                 )
             ]
@@ -409,16 +409,15 @@ private func makeMobileAutomationMCPServer(
         )
         let webDriverAgentTool = Tool(
             name: "workharness_wda",
-            description: "Start, inspect, or stop the WebDriverAgent server used for iOS UI automation.",
+            description: "Boot the target simulator and build-prepare WebDriverAgent for Claude in Mobile.",
             inputSchema: .object([
                 "type": .string("object"),
                 "properties": .object([
                     "action": .object([
                         "type": .string("string"),
                         "enum": .array([
-                            .string("ensure_running"),
-                            .string("status"),
-                            .string("stop")
+                            .string("prepare"),
+                            .string("status")
                         ])
                     ]),
                     "simulator_id": .object([
@@ -464,14 +463,12 @@ private func makeMobileAutomationMCPServer(
                 }
                 let report: WebDriverAgentReport
                 switch action {
-                case "ensure_running":
-                    report = try await webDriverAgent.ensureRunning(
+                case "prepare":
+                    report = try await webDriverAgent.prepare(
                         requestedSimulatorID: params.arguments?["simulator_id"]?.stringValue
                     )
                 case "status":
                     report = await webDriverAgent.status()
-                case "stop":
-                    report = await webDriverAgent.stop()
                 default:
                     throw MobileAutomationError.invalidArgumentsConfiguration
                 }
