@@ -45,6 +45,10 @@ let package = Package(
         .executable(
             name: "MobileAutomationMCPServer",
             targets: ["MobileAutomationMCPServer"]
+        ),
+        .executable(
+            name: "LLMGatewayMCPServer",
+            targets: ["LLMGatewayMCPServer"]
         )
     ],
     dependencies: [
@@ -143,6 +147,20 @@ let package = Package(
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "MCP", package: "swift-sdk")
             ]
+        ),
+
+        .executableTarget(
+            name: "LLMGatewayMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
+        .testTarget(
+            name: "LLMGatewayTests",
+            dependencies: ["Shared"]
         )
     ]
 )
