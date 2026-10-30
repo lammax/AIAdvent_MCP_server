@@ -26,7 +26,9 @@ The personal Claude Code commands are:
 - `/remote-start` — start the service if needed and copy the login token.
 - `/remote-status` — show service health.
 - `/remote-stop` — stop it until the next login or manual start.
-- `/remote-test` — verify the service and request a real decision from the iPhone.
+- `/remote-test` — verify single-select, multi-select, and free-text responses on the iPhone.
+
+The model-invoked `remote-mode` skill accepts two short handoffs: `Я ушёл` starts Remote and `Я здесь` stops it. It also understands explicit longer office/Remote commands. It only acts when the user sends such a message; it does not perform location tracking.
 
 ### Build and test
 
@@ -70,13 +72,28 @@ claude mcp add \
   --stdio
 ```
 
-The tool contract is:
+The primary tool contract groups heterogeneous questions into one request:
 
 ```text
-ask_user(question: string, options: string[2...12])
+ask_user(
+  questions: [{
+    id: string,
+    question: string,
+    type: "single_select" | "multi_select" | "text",
+    options?: string[2...12]
+  }]
+)
 ```
 
-On success it returns the request ID, `answered` status, and exact selected option. Timeout, cancellation, validation, and persistence failures are explicit errors; the server never invents a choice.
+All questions are displayed in one iPhone form and submitted atomically. Selection types require options; text questions omit them. Answers are returned in the original question order and matched by `id`. The original `ask_user(question, options)` form and its optional `mode` remain supported for compatibility. Timeout, cancellation, validation, and persistence failures are explicit errors; the server never invents an answer.
+
+The source files for the personal Claude Code commands live in `ClaudeSkills/`. Install them under `~/.claude/skills/` and restart an existing Claude Code session when the MCP schema changes. The Codex-specific `remote-mode` source lives in `CodexSkills/`; install it under `~/.codex/skills/`. Register the same stdio server in Codex with:
+
+```bash
+codex mcp add remote -- \
+  "$HOME/Library/Application Support/Remote/bin/RemoteMCPServer" \
+  --stdio
+```
 
 ### iPhone over Tailscale
 
@@ -86,6 +103,6 @@ Open this page on the iPhone while Tailscale is connected:
 http://100.123.251.91:3010/approvals
 ```
 
-Run `/remote-start` in Claude Code first, then paste the token from Universal Clipboard. A login remains valid until the server process restarts because browser sessions are intentionally held in memory.
+Run `/remote-start` in Claude Code for the initial login, then paste the token from Universal Clipboard. Safari receives a 90-day HttpOnly authentication cookie derived with HMAC from the token. It remains valid across `/remote-stop`, `/remote-start`, server upgrades, and Mac restarts; rotating the token invalidates it immediately. Saving the token in iCloud Passwords is a useful fallback if Safari data is cleared while away from the Mac.
 
 Do not use `0.0.0.0`, public port forwarding, an exit node, or DNS/routing changes. Tailscale and ZeroTier settings do not need to be modified.

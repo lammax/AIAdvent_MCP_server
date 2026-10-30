@@ -21,18 +21,40 @@ public struct ApprovalService: Sendable {
     public func create(
         question: String,
         options: [String],
+        kind: ApprovalKind = .singleSelect,
         now: Date = Date()
     ) async throws -> Approval {
-        let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedOptions = options.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        try validate(question: normalizedQuestion, options: normalizedOptions)
+        try await create(
+            questions: [
+                ApprovalQuestion(
+                    id: "answer",
+                    question: question,
+                    kind: kind,
+                    options: options
+                )
+            ],
+            now: now
+        )
+    }
+
+    public func create(
+        questions: [ApprovalQuestion],
+        now: Date = Date()
+    ) async throws -> Approval {
+        let normalizedQuestions = questions.map {
+            ApprovalQuestion(
+                id: $0.id.trimmingCharacters(in: .whitespacesAndNewlines),
+                question: $0.question.trimmingCharacters(in: .whitespacesAndNewlines),
+                kind: $0.kind,
+                options: $0.options.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            )
+        }
+        try validate(questions: normalizedQuestions)
 
         let approval = Approval(
             id: UUID(),
-            question: normalizedQuestion,
-            options: normalizedOptions,
+            questions: normalizedQuestions,
             status: .pending,
-            response: nil,
             createdAt: now,
             expiresAt: now.addingTimeInterval(timeout),
             answeredAt: nil
@@ -41,8 +63,25 @@ public struct ApprovalService: Sendable {
         return approval
     }
 
-    public func createAndWait(question: String, options: [String]) async throws -> Approval {
-        let approval = try await create(question: question, options: options)
+    public func createAndWait(
+        question: String,
+        options: [String],
+        kind: ApprovalKind = .singleSelect
+    ) async throws -> Approval {
+        try await createAndWait(
+            questions: [
+                ApprovalQuestion(
+                    id: "answer",
+                    question: question,
+                    kind: kind,
+                    options: options
+                )
+            ]
+        )
+    }
+
+    public func createAndWait(questions: [ApprovalQuestion]) async throws -> Approval {
+        let approval = try await create(questions: questions)
         do {
             return try await waitForResponse(id: approval.id)
         } catch is CancellationError {
@@ -87,9 +126,28 @@ public struct ApprovalService: Sendable {
     }
 
     public func respond(id: UUID, response: String, now: Date = Date()) async throws -> Approval {
+        try await respond(id: id, responses: [response], now: now)
+    }
+
+    public func respond(id: UUID, responses: [String], now: Date = Date()) async throws -> Approval {
+        try await respond(
+            id: id,
+            answers: [ApprovalAnswer(id: "answer", responses: responses)],
+            now: now
+        )
+    }
+
+    public func respond(id: UUID, answers: [ApprovalAnswer], now: Date = Date()) async throws -> Approval {
         try await repository.respond(
             id: id,
-            response: response.trimmingCharacters(in: .whitespacesAndNewlines),
+            answers: answers.map { answer in
+                ApprovalAnswer(
+                    id: answer.id.trimmingCharacters(in: .whitespacesAndNewlines),
+                    responses: answer.responses.map {
+                        $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                )
+            },
             now: now
         )
     }
@@ -98,12 +156,35 @@ public struct ApprovalService: Sendable {
         try await repository.cancel(id: id, now: now)
     }
 
-    private func validate(question: String, options: [String]) throws {
-        guard !question.isEmpty else { throw ApprovalError.emptyQuestion }
-        guard question.count <= 4_000 else { throw ApprovalError.questionTooLong }
-        guard (2...12).contains(options.count) else { throw ApprovalError.invalidOptionCount }
-        guard options.allSatisfy({ !$0.isEmpty }) else { throw ApprovalError.emptyOption }
-        guard options.allSatisfy({ $0.count <= 500 }) else { throw ApprovalError.optionTooLong }
-        guard Set(options).count == options.count else { throw ApprovalError.duplicateOptions }
+    private func validate(questions: [ApprovalQuestion]) throws {
+        guard (1...12).contains(questions.count) else {
+            throw ApprovalError.invalidQuestionCount
+        }
+        guard questions.allSatisfy({ (1...100).contains($0.id.count) }) else {
+            throw ApprovalError.invalidQuestionID
+        }
+        guard Set(questions.map(\.id)).count == questions.count else {
+            throw ApprovalError.duplicateQuestionIDs
+        }
+        for question in questions {
+            guard !question.question.isEmpty else { throw ApprovalError.emptyQuestion }
+            guard question.question.count <= 4_000 else { throw ApprovalError.questionTooLong }
+            if question.kind == .text {
+                guard question.options.isEmpty else { throw ApprovalError.invalidOptionCount }
+                continue
+            }
+            guard (2...12).contains(question.options.count) else {
+                throw ApprovalError.invalidOptionCount
+            }
+            guard question.options.allSatisfy({ !$0.isEmpty }) else {
+                throw ApprovalError.emptyOption
+            }
+            guard question.options.allSatisfy({ $0.count <= 500 }) else {
+                throw ApprovalError.optionTooLong
+            }
+            guard Set(question.options).count == question.options.count else {
+                throw ApprovalError.duplicateOptions
+            }
+        }
     }
 }

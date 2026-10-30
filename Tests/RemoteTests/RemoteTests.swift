@@ -16,8 +16,10 @@ final class RemoteTests: XCTestCase {
 
         XCTAssertEqual(loaded?.id, created.id)
         XCTAssertEqual(loaded?.question, created.question)
+        XCTAssertEqual(loaded?.kind, .singleSelect)
         XCTAssertEqual(loaded?.options, created.options)
         XCTAssertEqual(loaded?.status, .pending)
+        XCTAssertEqual(loaded?.responses, [])
         XCTAssertEqual(try XCTUnwrap(loaded?.createdAt).timeIntervalSince1970, created.createdAt.timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(try XCTUnwrap(loaded?.expiresAt).timeIntervalSince1970, created.expiresAt.timeIntervalSince1970, accuracy: 0.001)
     }
@@ -58,6 +60,107 @@ final class RemoteTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? ApprovalError, .notFound(unknownID))
         }
+    }
+
+    func testMultiSelectReturnsEverySelectionAndRejectsInvalidSets() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let approval = try await fixture.service.create(
+            question: "Choose integrations",
+            options: ["GitHub", "Linear", "Slack"],
+            kind: .multiSelect
+        )
+
+        do {
+            _ = try await fixture.service.respond(
+                id: approval.id,
+                responses: ["GitHub", "GitHub"]
+            )
+            XCTFail("Duplicate selections must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ApprovalError, .invalidResponse)
+        }
+
+        let answered = try await fixture.service.respond(
+            id: approval.id,
+            responses: ["GitHub", "Slack"]
+        )
+        XCTAssertEqual(answered.kind, .multiSelect)
+        XCTAssertEqual(answered.responses, ["GitHub", "Slack"])
+    }
+
+    func testTextResponseIsTrimmedAndValidated() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let approval = try await fixture.service.create(
+            question: "What should Claude change?",
+            options: [],
+            kind: .text
+        )
+
+        do {
+            _ = try await fixture.service.respond(id: approval.id, response: "   ")
+            XCTFail("An empty text response must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ApprovalError, .emptyResponse)
+        }
+
+        let answered = try await fixture.service.respond(
+            id: approval.id,
+            response: "  Add a compact mode  "
+        )
+        XCTAssertEqual(answered.kind, .text)
+        XCTAssertEqual(answered.response, "Add a compact mode")
+        XCTAssertEqual(answered.responses, ["Add a compact mode"])
+    }
+
+    func testMixedQuestionRequestIsAnsweredAtomically() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let approval = try await fixture.service.create(questions: [
+            ApprovalQuestion(
+                id: "architecture",
+                question: "Choose architecture",
+                kind: .singleSelect,
+                options: ["MVVM", "TCA"]
+            ),
+            ApprovalQuestion(
+                id: "integrations",
+                question: "Choose integrations",
+                kind: .multiSelect,
+                options: ["GitHub", "Linear", "Slack"]
+            ),
+            ApprovalQuestion(
+                id: "comment",
+                question: "Additional notes",
+                kind: .text
+            )
+        ])
+
+        do {
+            _ = try await fixture.service.respond(
+                id: approval.id,
+                answers: [ApprovalAnswer(id: "architecture", responses: ["TCA"])]
+            )
+            XCTFail("A partial batch response must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ApprovalError, .invalidResponse)
+        }
+
+        let answered = try await fixture.service.respond(
+            id: approval.id,
+            answers: [
+                ApprovalAnswer(id: "comment", responses: ["  Ship it  "]),
+                ApprovalAnswer(id: "integrations", responses: ["GitHub", "Slack"]),
+                ApprovalAnswer(id: "architecture", responses: ["TCA"])
+            ]
+        )
+
+        XCTAssertEqual(answered.status, .answered)
+        XCTAssertEqual(answered.questions.map(\.id), ["architecture", "integrations", "comment"])
+        XCTAssertEqual(answered.questions.map(\.responses), [
+            ["TCA"], ["GitHub", "Slack"], ["Ship it"]
+        ])
     }
 
     func testInvalidApprovalInputIsRejectedBeforePersistence() async throws {
@@ -224,7 +327,90 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(try response.content.decode(ApprovalResponse.self).response, "B")
     }
 
-    func testLoginRejectsWrongTokenAndCreatesHTTPOnlySessionForCorrectToken() async throws {
+    func testHTTPAPIAcceptsMultipleSelections() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let app = try await makeApplication(service: fixture.service, token: fixture.token)
+        defer { Task { try? await app.asyncShutdown() } }
+        let approval = try await fixture.service.create(
+            question: "Choose",
+            options: ["A", "B", "C"],
+            kind: .multiSelect
+        )
+
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        headers.contentType = .json
+        let response = try await app.sendRequest(
+            .POST,
+            "/approvals/\(approval.id.uuidString)/respond",
+            headers: headers,
+            body: byteBuffer(#"{"responses":["A","C"]}"#)
+        )
+
+        XCTAssertEqual(response.status, .ok)
+        let decoded = try response.content.decode(ApprovalResponse.self)
+        XCTAssertEqual(decoded.kind, .multiSelect)
+        XCTAssertEqual(decoded.responses, ["A", "C"])
+    }
+
+    func testHTTPAPIAcceptsMixedQuestionAnswers() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let app = try await makeApplication(service: fixture.service, token: fixture.token)
+        defer { Task { try? await app.asyncShutdown() } }
+        let approval = try await fixture.service.create(questions: [
+            ApprovalQuestion(
+                id: "choice",
+                question: "Choose",
+                kind: .singleSelect,
+                options: ["A", "B"]
+            ),
+            ApprovalQuestion(id: "note", question: "Explain", kind: .text)
+        ])
+
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        headers.contentType = .json
+        let response = try await app.sendRequest(
+            .POST,
+            "/approvals/\(approval.id.uuidString)/respond",
+            headers: headers,
+            body: byteBuffer(
+                #"{"answers":[{"id":"choice","responses":["B"]},{"id":"note","responses":["Because"]}]}"#
+            )
+        )
+
+        XCTAssertEqual(response.status, .ok)
+        let decoded = try response.content.decode(ApprovalResponse.self)
+        XCTAssertEqual(decoded.questions.map(\.responses), [["B"], ["Because"]])
+    }
+
+    func testApprovalPageDoesNotReplaceAnUnchangedOrDirtyForm() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let app = try await makeApplication(service: fixture.service, token: fixture.token)
+        defer { Task { try? await app.asyncShutdown() } }
+
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        let response = try await app.sendRequest(.GET, "/approvals", headers: headers)
+        let html = try XCTUnwrap(
+            response.body.getString(
+                at: response.body.readerIndex,
+                length: response.body.readableBytes
+            )
+        )
+
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertTrue(html.contains("if (signature === renderedSignature) return;"))
+        XCTAssertTrue(html.contains("if (formDirty && state.querySelector('form')) return;"))
+        XCTAssertTrue(html.contains("form.addEventListener('focusin'"))
+        XCTAssertTrue(html.contains("form.addEventListener('input'"))
+        XCTAssertEqual(response.headers.first(name: "Cache-Control"), "no-store, no-cache, must-revalidate")
+    }
+
+    func testLoginCookieSurvivesServerRestartAndRejectsTokenRotation() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
         let app = try await makeApplication(service: fixture.service, token: fixture.token)
@@ -247,9 +433,36 @@ final class RemoteTests: XCTestCase {
         )
         XCTAssertTrue(accepted.status == .seeOther || accepted.status == .temporaryRedirect)
         let cookie = accepted.headers["Set-Cookie"].joined(separator: ";")
-        XCTAssertTrue(cookie.contains("remote-session="))
+        XCTAssertTrue(cookie.contains("remote-auth="))
         XCTAssertTrue(cookie.lowercased().contains("httponly"))
         XCTAssertTrue(cookie.lowercased().contains("samesite=strict"))
+        let cookiePair = try XCTUnwrap(cookie.split(separator: ";").first.map(String.init))
+
+        var cookieHeaders = HTTPHeaders()
+        cookieHeaders.add(name: .cookie, value: cookiePair)
+        let restartedApp = try await makeApplication(
+            service: fixture.service,
+            token: fixture.token
+        )
+        let afterRestart = try await restartedApp.sendRequest(
+            .GET,
+            "/approvals",
+            headers: cookieHeaders
+        )
+        XCTAssertEqual(afterRestart.status, .ok)
+        try await restartedApp.asyncShutdown()
+
+        let rotatedTokenApp = try await makeApplication(
+            service: fixture.service,
+            token: fixture.token + "-rotated"
+        )
+        let afterRotation = try await rotatedTokenApp.sendRequest(
+            .GET,
+            "/approvals",
+            headers: cookieHeaders
+        )
+        XCTAssertTrue(afterRotation.status == .seeOther || afterRotation.status == .temporaryRedirect)
+        try await rotatedTokenApp.asyncShutdown()
     }
 
     private func makeFixture(
@@ -274,20 +487,6 @@ final class RemoteTests: XCTestCase {
 
     private func makeApplication(service: ApprovalService, token: String) async throws -> Application {
         let app = try await Application.make(.testing)
-        app.sessions.use(.memory)
-        app.sessions.configuration = .init(cookieName: "remote-session") { sessionID in
-            HTTPCookies.Value(
-                string: sessionID.string,
-                expires: Date(timeIntervalSinceNow: 3_600),
-                maxAge: 3_600,
-                domain: nil,
-                path: "/",
-                isSecure: false,
-                isHTTPOnly: true,
-                sameSite: .strict
-            )
-        }
-        app.middleware.use(app.sessions.middleware)
         configureApprovalHTTPRoutes(
             app: app,
             service: service,

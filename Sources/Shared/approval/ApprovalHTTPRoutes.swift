@@ -1,11 +1,21 @@
 import Foundation
+import CryptoKit
 import Vapor
 
 public struct ApprovalHTTPAuthorization: Sendable {
+    public static let cookieName = "remote-auth"
+    private static let sessionLifetime = 60 * 60 * 24 * 90
+
     private let token: String
+    private let sessionToken: String
 
     public init(token: String) {
         self.token = token
+        let authenticationCode = HMAC<SHA256>.authenticationCode(
+            for: Data("remote-auth-v1".utf8),
+            using: SymmetricKey(data: Data(token.utf8))
+        )
+        self.sessionToken = authenticationCode.map { String(format: "%02x", $0) }.joined()
     }
 
     public func validate(token candidate: String) -> Bool {
@@ -16,12 +26,39 @@ public struct ApprovalHTTPAuthorization: Sendable {
         if isBearerAuthorized(request) {
             return true
         }
-        return request.session.data["remote-authorized"] == "true"
+        guard let cookie = request.cookies[Self.cookieName] else { return false }
+        return constantTimeEquals(sessionToken, cookie.string)
     }
 
     public func isBearerAuthorized(_ request: Request) -> Bool {
         guard let bearer = request.headers.bearerAuthorization else { return false }
         return validate(token: bearer.token)
+    }
+
+    public func authorizedCookie() -> HTTPCookies.Value {
+        HTTPCookies.Value(
+            string: sessionToken,
+            expires: Date(timeIntervalSinceNow: TimeInterval(Self.sessionLifetime)),
+            maxAge: Self.sessionLifetime,
+            domain: nil,
+            path: "/",
+            isSecure: false,
+            isHTTPOnly: true,
+            sameSite: .strict
+        )
+    }
+
+    public func expiredCookie() -> HTTPCookies.Value {
+        HTTPCookies.Value(
+            string: "",
+            expires: Date(timeIntervalSince1970: 0),
+            maxAge: 0,
+            domain: nil,
+            path: "/",
+            isSecure: false,
+            isHTTPOnly: true,
+            sameSite: .strict
+        )
     }
 
     private func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
@@ -63,13 +100,15 @@ public func configureApprovalHTTPRoutes(
         guard authorization.validate(token: login.token) else {
             return htmlResponse(ApprovalWebPage.login(error: "Invalid token."), status: .unauthorized)
         }
-        request.session.data["remote-authorized"] = "true"
-        return request.redirect(to: "/approvals")
+        let response = request.redirect(to: "/approvals")
+        response.cookies[ApprovalHTTPAuthorization.cookieName] = authorization.authorizedCookie()
+        return response
     }
 
     app.post("logout") { request -> Response in
-        request.session.destroy()
-        return request.redirect(to: "/login")
+        let response = request.redirect(to: "/login")
+        response.cookies[ApprovalHTTPAuthorization.cookieName] = authorization.expiredCookie()
+        return response
     }
 
     app.get("approvals") { request -> Response in
@@ -99,7 +138,14 @@ public func configureApprovalHTTPRoutes(
         let id = try approvalID(from: request)
         let body = try request.content.decode(ApprovalSubmitResponse.self)
         do {
-            return ApprovalResponse(try await service.respond(id: id, response: body.response))
+            let approval: Approval
+            if let answers = body.answers {
+                approval = try await service.respond(id: id, answers: answers)
+            } else {
+                let responses = body.responses ?? body.response.map { [$0] } ?? []
+                approval = try await service.respond(id: id, responses: responses)
+            }
+            return ApprovalResponse(approval)
         } catch let error as ApprovalError {
             throw abort(for: error)
         }
@@ -134,8 +180,10 @@ private func abort(for error: ApprovalError) -> Abort {
         Abort(.gone, reason: error.localizedDescription)
     case .cancelled:
         Abort(.conflict, reason: error.localizedDescription)
-    case .emptyQuestion, .questionTooLong, .invalidOptionCount, .emptyOption,
-         .optionTooLong, .duplicateOptions, .invalidResponse:
+    case .emptyQuestion, .questionTooLong, .invalidQuestionCount, .invalidQuestionID,
+         .duplicateQuestionIDs, .invalidOptionCount, .emptyOption,
+         .optionTooLong, .duplicateOptions, .emptyResponse, .responseTooLong,
+         .invalidResponse:
         Abort(.badRequest, reason: error.localizedDescription)
     }
 }
@@ -143,7 +191,11 @@ private func abort(for error: ApprovalError) -> Abort {
 private func htmlResponse(_ html: String, status: HTTPResponseStatus = .ok) -> Response {
     Response(
         status: status,
-        headers: ["Content-Type": "text/html; charset=utf-8"],
+        headers: [
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        ],
         body: .init(string: html)
     )
 }
@@ -154,10 +206,18 @@ private struct ApprovalLoginRequest: Content {
 }
 
 public struct ApprovalSubmitResponse: Content, Sendable {
-    public let response: String
+    public let response: String?
+    public let responses: [String]?
+    public let answers: [ApprovalAnswer]?
 
-    public init(response: String) {
+    public init(
+        response: String? = nil,
+        responses: [String]? = nil,
+        answers: [ApprovalAnswer]? = nil
+    ) {
         self.response = response
+        self.responses = responses
+        self.answers = answers
     }
 }
 
@@ -179,20 +239,26 @@ public struct ApprovalListResponse: Content, Sendable {
 
 public struct ApprovalResponse: Content, Sendable {
     public let id: UUID
+    public let questions: [ApprovalQuestion]
     public let question: String
+    public let kind: ApprovalKind
     public let options: [String]
     public let status: ApprovalStatus
     public let response: String?
+    public let responses: [String]
     public let createdAt: Date
     public let expiresAt: Date
     public let answeredAt: Date?
 
     public init(_ approval: Approval) {
         self.id = approval.id
+        self.questions = approval.questions
         self.question = approval.question
+        self.kind = approval.kind
         self.options = approval.options
         self.status = approval.status
         self.response = approval.response
+        self.responses = approval.responses
         self.createdAt = approval.createdAt
         self.expiresAt = approval.expiresAt
         self.answeredAt = approval.answeredAt
@@ -249,6 +315,8 @@ private enum ApprovalWebPage {
           <script>
           const state = document.getElementById('state');
           let submitting = false;
+          let renderedSignature = null;
+          let formDirty = false;
 
           function node(tag, className, text) {
             const element = document.createElement(tag);
@@ -264,9 +332,16 @@ private enum ApprovalWebPage {
               if (response.status === 401) { window.location = '/login'; return; }
               if (!response.ok) throw new Error('Request failed');
               const payload = await response.json();
-              render(payload.approvals || []);
+              const approvals = payload.approvals || [];
+              const signature = JSON.stringify(approvals);
+              if (signature === renderedSignature) return;
+              if (formDirty && state.querySelector('form')) return;
+              renderedSignature = signature;
+              render(approvals);
             } catch (_) {
-              state.replaceChildren(node('p', 'error', 'Unable to reach the approval service. Retrying…'));
+              if (!state.querySelector('form')) {
+                state.replaceChildren(node('p', 'error', 'Unable to reach the approval service. Retrying…'));
+              }
             }
           }
 
@@ -279,34 +354,66 @@ private enum ApprovalWebPage {
             }
             approvals.forEach((approval) => {
               const article = node('article', 'approval');
-              article.append(node('p', 'question', approval.question));
               const form = node('form', 'options');
-              approval.options.forEach((option, index) => {
-                const label = node('label', 'option');
-                const radio = document.createElement('input');
-                radio.type = 'radio'; radio.name = 'response'; radio.value = option;
-                radio.required = true; if (index === 0) radio.checked = true;
-                label.append(radio, node('span', null, option));
-                form.append(label);
+              approval.questions.forEach((question) => {
+                const fieldset = node('fieldset', 'question-block');
+                fieldset.append(node('legend', 'question', question.question));
+                if (question.kind === 'text') {
+                  const input = document.createElement('textarea');
+                  input.name = question.id; input.required = true; input.maxLength = 4000;
+                  input.rows = 5; input.placeholder = 'Type your answer…';
+                  fieldset.append(input);
+                } else {
+                  question.options.forEach((option, index) => {
+                    const label = node('label', 'option');
+                    const input = document.createElement('input');
+                    input.type = question.kind === 'multi_select' ? 'checkbox' : 'radio';
+                    input.name = question.id; input.value = option;
+                    if (question.kind === 'single_select') {
+                      input.required = true; if (index === 0) input.checked = true;
+                    }
+                    label.append(input, node('span', null, option));
+                    fieldset.append(label);
+                  });
+                }
+                form.append(fieldset);
               });
               const submit = node('button', null, 'Submit decision');
               submit.type = 'submit'; form.append(submit);
-              form.addEventListener('submit', (event) => submitDecision(event, approval.id, form, submit));
+              form.addEventListener('focusin', () => { formDirty = true; });
+              form.addEventListener('input', () => { formDirty = true; });
+              form.addEventListener('change', () => { formDirty = true; });
+              form.addEventListener('submit', (event) => submitDecision(event, approval, form, submit));
               article.append(form); state.append(article);
             });
           }
 
-          async function submitDecision(event, id, form, button) {
-            event.preventDefault(); submitting = true; button.disabled = true; button.textContent = 'Submitting…';
-            const response = new FormData(form).get('response');
+          async function submitDecision(event, approval, form, button) {
+            event.preventDefault();
+            const data = new FormData(form);
+            const answers = [];
+            for (const question of approval.questions) {
+              const responses = question.kind === 'text'
+                ? [String(data.get(question.id) || '').trim()]
+                : data.getAll(question.id).map(String);
+              if (!responses.length || responses.some((value) => !value)) {
+                form.prepend(node('p', 'error', question.kind === 'multi_select'
+                  ? 'Select at least one option for every multi-select question.'
+                  : 'Answer every question.'));
+                return;
+              }
+              answers.push({ id: question.id, responses });
+            }
+            submitting = true; button.disabled = true; button.textContent = 'Submitting…';
             try {
-              const result = await fetch(`/approvals/${id}/respond`, {
+              const result = await fetch(`/approvals/${approval.id}/respond`, {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ response })
+                body: JSON.stringify({ answers })
               });
               if (!result.ok) throw new Error('Submit failed');
-              state.replaceChildren(node('p', 'success', `Decision sent: ${response}`));
+              formDirty = false; renderedSignature = null;
+              state.replaceChildren(node('p', 'success', 'Answers sent.'));
               setTimeout(loadApprovals, 900);
             } catch (_) {
               button.disabled = false; button.textContent = 'Submit decision';
@@ -332,12 +439,15 @@ private enum ApprovalWebPage {
     .card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
     .login-card { margin-top: 10vh; }
     label { display: block; font-weight: 650; margin: 18px 0 8px; }
-    input[type=password] { width: 100%; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font-size: 1rem; }
+    input[type=password], textarea { width: 100%; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font: inherit; }
+    textarea { margin-top: 14px; resize: vertical; }
     button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; }
     button:disabled { opacity: .55; }
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
     .approval + .approval { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
-    .question { margin: 0; font-size: 1.15rem; font-weight: 750; line-height: 1.45; white-space: pre-wrap; }
+    .question-block { border: 0; padding: 0; margin: 0; min-width: 0; }
+    .question-block + .question-block { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
+    .question { margin: 0; padding: 0; font-size: 1.15rem; font-weight: 750; line-height: 1.45; white-space: pre-wrap; }
     .options { margin-top: 14px; }
     .option { display: flex; align-items: flex-start; gap: 12px; margin: 10px 0; padding: 14px; border: 1px solid #cbd5e1; border-radius: 14px; line-height: 1.35; }
     .option input { width: 22px; height: 22px; margin: 0; flex: 0 0 auto; }
@@ -349,7 +459,7 @@ private enum ApprovalWebPage {
       body { background: #0f172a; color: #f8fafc; }
       .card { background: #1e293b; box-shadow: none; }
       .muted { color: #94a3b8; }
-      input[type=password], .option { border-color: #475569; background: #0f172a; color: #f8fafc; }
+      input[type=password], textarea, .option { border-color: #475569; background: #0f172a; color: #f8fafc; }
       button.secondary { background: #334155; color: #f8fafc; }
     }
     """

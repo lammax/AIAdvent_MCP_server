@@ -1,0 +1,16 @@
+---
+name: remote-mode
+description: Control Remote from the user's short handoff phrases. Always trigger when the complete user message is "Я ушёл" to enable Remote or "Я здесь" to disable Remote, ignoring capitalization and terminal punctuation. Also trigger for explicit longer commands about leaving or returning to the office or enabling or disabling Remote. Do not infer a mode change from those words inside unrelated longer messages.
+allowed-tools:
+  - Bash(/Users/lammax/.local/bin/remote-control start)
+  - Bash(/Users/lammax/.local/bin/remote-control stop)
+---
+
+Map the user's explicit intent to exactly one action:
+
+- Exact short message `Я ушёл`, leaving the office, or enabling Remote: run `/Users/lammax/.local/bin/remote-control start` exactly once.
+- Exact short message `Я здесь`, returning to the office, or disabling Remote: run `/Users/lammax/.local/bin/remote-control stop` exactly once.
+
+Never run both actions in one invocation. If the direction is ambiguous, ask a concise clarifying question and do not run either command.
+
+Report the resulting mode concisely. When starting, state that the login token was copied to the Mac clipboard, but never read, print, quote, summarize, or expose the token itself. Do not change Tailscale, ZeroTier, DNS, routes, the LaunchAgent, the database, or Claude's MCP registration.

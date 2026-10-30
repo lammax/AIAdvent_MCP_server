@@ -41,20 +41,25 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
 
     public func create(_ approval: Approval) async throws {
         let optionsJSON = try Self.encodeOptions(approval.options)
+        let responsesJSON = try Self.encodeOptions(approval.responses)
+        let questionsJSON = try Self.encode(approval.questions)
         try await dbQueue.write { db in
             try db.execute(
                 sql: """
                 INSERT INTO approvals (
-                    id, question, options_json, status, response,
+                    id, question, kind, options_json, status, response, responses_json, questions_json,
                     created_at, expires_at, answered_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 arguments: [
                     approval.id.uuidString,
                     approval.question,
+                    approval.kind.rawValue,
                     optionsJSON,
                     approval.status.rawValue,
                     approval.response,
+                    responsesJSON,
+                    questionsJSON,
                     approval.createdAt.timeIntervalSince1970,
                     approval.expiresAt.timeIntervalSince1970,
                     approval.answeredAt?.timeIntervalSince1970
@@ -86,7 +91,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
         }
     }
 
-    public func respond(id: UUID, response: String, now: Date) async throws -> Approval {
+    public func respond(id: UUID, answers: [ApprovalAnswer], now: Date) async throws -> Approval {
         try await dbQueue.write { db in
             try Self.expirePendingApprovals(db: db, now: now)
             guard let existing = try Self.fetchApproval(db: db, id: id) else {
@@ -104,19 +109,22 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
                 break
             }
 
-            guard existing.options.contains(response) else {
-                throw ApprovalError.invalidResponse
-            }
+            let answeredQuestions = try Self.applying(answers: answers, to: existing.questions)
+            let firstResponses = answeredQuestions.first?.responses ?? []
+            let responsesJSON = try Self.encodeOptions(firstResponses)
+            let questionsJSON = try Self.encode(answeredQuestions)
 
             try db.execute(
                 sql: """
                 UPDATE approvals
-                SET status = ?, response = ?, answered_at = ?
+                SET status = ?, response = ?, responses_json = ?, questions_json = ?, answered_at = ?
                 WHERE id = ? AND status = ? AND expires_at > ?
                 """,
                 arguments: [
                     ApprovalStatus.answered.rawValue,
-                    response,
+                    firstResponses.first,
+                    responsesJSON,
+                    questionsJSON,
                     now.timeIntervalSince1970,
                     id.uuidString,
                     ApprovalStatus.pending.rawValue,
@@ -167,6 +175,20 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
                 table.column("answered_at", .double)
             }
         }
+        migrator.registerMigration("addApprovalKindsAndResponses") { db in
+            try db.alter(table: "approvals") { table in
+                table.add(
+                    column: "kind",
+                    .text
+                ).notNull().defaults(to: ApprovalKind.singleSelect.rawValue)
+                table.add(column: "responses_json", .text)
+            }
+        }
+        migrator.registerMigration("addApprovalQuestions") { db in
+            try db.alter(table: "approvals") { table in
+                table.add(column: "questions_json", .text)
+            }
+        }
         return migrator
     }
 
@@ -199,21 +221,35 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
     private static func decodeApproval(_ row: Row) throws -> Approval {
         let idString: String = row["id"]
         let statusString: String = row["status"]
+        let kindString: String = row["kind"]
         let optionsJSON: String = row["options_json"]
         guard let id = UUID(uuidString: idString),
-              let status = ApprovalStatus(rawValue: statusString)
+              let status = ApprovalStatus(rawValue: statusString),
+              let kind = ApprovalKind(rawValue: kindString)
         else {
             throw ApprovalPersistenceError.corruptRecord
         }
 
         let response: String? = row["response"]
+        let responsesJSON: String? = row["responses_json"]
+        let responses = try responsesJSON.map(decodeOptions) ?? response.map { [$0] } ?? []
+        let questionsJSON: String? = row["questions_json"]
+        let questions = try questionsJSON.map {
+            try decode([ApprovalQuestion].self, from: $0)
+        } ?? [
+            ApprovalQuestion(
+                id: "answer",
+                question: row["question"],
+                kind: kind,
+                options: try decodeOptions(optionsJSON),
+                responses: responses
+            )
+        ]
         let answeredAtInterval: Double? = row["answered_at"]
         return Approval(
             id: id,
-            question: row["question"],
-            options: try decodeOptions(optionsJSON),
+            questions: questions,
             status: status,
-            response: response,
             createdAt: Date(timeIntervalSince1970: row["created_at"]),
             expiresAt: Date(timeIntervalSince1970: row["expires_at"]),
             answeredAt: answeredAtInterval.map(Date.init(timeIntervalSince1970:))
@@ -229,10 +265,73 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
     }
 
     private static func decodeOptions(_ json: String) throws -> [String] {
+        try decode([String].self, from: json)
+    }
+
+    private static func encode<T: Encodable>(_ value: T) throws -> String {
+        let data = try JSONEncoder().encode(value)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw ApprovalPersistenceError.invalidOptionsEncoding
+        }
+        return json
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
         guard let data = json.data(using: .utf8) else {
             throw ApprovalPersistenceError.invalidOptionsEncoding
         }
-        return try JSONDecoder().decode([String].self, from: data)
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private static func applying(
+        answers: [ApprovalAnswer],
+        to questions: [ApprovalQuestion]
+    ) throws -> [ApprovalQuestion] {
+        var answersByID: [String: [String]] = [:]
+        for answer in answers {
+            guard answersByID.updateValue(answer.responses, forKey: answer.id) == nil else {
+                throw ApprovalError.invalidResponse
+            }
+        }
+        guard Set(answersByID.keys) == Set(questions.map(\.id)) else {
+            throw ApprovalError.invalidResponse
+        }
+        return try questions.map { question in
+            guard let responses = answersByID[question.id] else {
+                throw ApprovalError.invalidResponse
+            }
+            try validate(responses: responses, for: question)
+            return ApprovalQuestion(
+                id: question.id,
+                question: question.question,
+                kind: question.kind,
+                options: question.options,
+                responses: responses
+            )
+        }
+    }
+
+    private static func validate(responses: [String], for question: ApprovalQuestion) throws {
+        switch question.kind {
+        case .singleSelect:
+            guard responses.count == 1,
+                  question.options.contains(responses[0])
+            else {
+                throw ApprovalError.invalidResponse
+            }
+        case .multiSelect:
+            guard !responses.isEmpty,
+                  responses.count <= question.options.count,
+                  Set(responses).count == responses.count,
+                  responses.allSatisfy(question.options.contains)
+            else {
+                throw ApprovalError.invalidResponse
+            }
+        case .text:
+            guard responses.count == 1 else { throw ApprovalError.invalidResponse }
+            guard !responses[0].isEmpty else { throw ApprovalError.emptyResponse }
+            guard responses[0].count <= 4_000 else { throw ApprovalError.responseTooLong }
+        }
     }
 }
 
