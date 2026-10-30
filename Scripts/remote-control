@@ -9,6 +9,7 @@ plist_path="${HOME}/Library/LaunchAgents/${label}.plist"
 token_path="${HOME}/Library/Application Support/Remote/token"
 health_url="http://100.123.251.91:3010/health"
 approvals_url="http://100.123.251.91:3010/approvals"
+claude_url="http://100.123.251.91:3010/claude"
 
 is_loaded() {
     launchctl print "${service_target}" >/dev/null 2>&1
@@ -47,13 +48,16 @@ start_remote() {
         exit 1
     fi
     /usr/bin/tr -d '\r\n' < "${token_path}" | /usr/bin/pbcopy
-    echo "Remote is running at ${approvals_url}"
+    echo "Remote approvals: ${approvals_url}"
+    echo "Remote Claude: ${claude_url}"
     echo "The login token was copied to the Mac clipboard for Universal Clipboard paste on iPhone."
 }
 
 status_remote() {
     if is_healthy; then
-        echo "Remote is running and healthy at ${approvals_url}"
+        echo "Remote is running and healthy."
+        echo "Approvals: ${approvals_url}"
+        echo "Claude tasks: ${claude_url}"
         return 0
     fi
     if is_loaded; then

@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-public actor SQLiteApprovalRepository: ApprovalRepository {
+public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobRepository {
     private let dbQueue: DatabaseQueue
     public let path: String
 
@@ -161,6 +161,147 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
         }
     }
 
+    public func createClaudeJob(_ job: RemoteClaudeJob) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO remote_claude_jobs (
+                    id, prompt, working_directory, status, response, error_message, session_id,
+                    created_at, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    job.id.uuidString,
+                    job.prompt,
+                    job.workingDirectory,
+                    job.status.rawValue,
+                    job.response,
+                    job.errorMessage,
+                    job.sessionID,
+                    job.createdAt.timeIntervalSince1970,
+                    job.startedAt?.timeIntervalSince1970,
+                    job.completedAt?.timeIntervalSince1970,
+                ]
+            )
+        }
+    }
+
+    public func claudeJob(id: UUID) async throws -> RemoteClaudeJob? {
+        try await dbQueue.read { db in
+            try Self.fetchClaudeJob(db: db, id: id)
+        }
+    }
+
+    public func recentClaudeJobs(limit: Int) async throws -> [RemoteClaudeJob] {
+        try await dbQueue.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM remote_claude_jobs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                arguments: [limit]
+            )
+            return try rows.map(Self.decodeClaudeJob)
+        }
+    }
+
+    public func requeueInterruptedClaudeJobs() async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET status = ?, started_at = NULL
+                WHERE status = ?
+                """,
+                arguments: [
+                    RemoteClaudeJobStatus.queued.rawValue,
+                    RemoteClaudeJobStatus.running.rawValue,
+                ]
+            )
+        }
+    }
+
+    public func claimNextClaudeJob(startedAt: Date) async throws -> RemoteClaudeJob? {
+        try await dbQueue.write { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT * FROM remote_claude_jobs
+                WHERE status = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                arguments: [RemoteClaudeJobStatus.queued.rawValue]
+            ) else {
+                return nil
+            }
+            let idString: String = row["id"]
+            guard let id = UUID(uuidString: idString) else {
+                throw ApprovalPersistenceError.corruptRecord
+            }
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET status = ?, started_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                arguments: [
+                    RemoteClaudeJobStatus.running.rawValue,
+                    startedAt.timeIntervalSince1970,
+                    id.uuidString,
+                    RemoteClaudeJobStatus.queued.rawValue,
+                ]
+            )
+            guard db.changesCount == 1 else { return nil }
+            return try Self.fetchClaudeJob(db: db, id: id)
+        }
+    }
+
+    public func completeClaudeJob(
+        id: UUID,
+        result: RemoteClaudeJobResult,
+        completedAt: Date
+    ) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET status = ?, response = ?, error_message = NULL, session_id = ?, completed_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                arguments: [
+                    RemoteClaudeJobStatus.completed.rawValue,
+                    result.response,
+                    result.sessionID,
+                    completedAt.timeIntervalSince1970,
+                    id.uuidString,
+                    RemoteClaudeJobStatus.running.rawValue,
+                ]
+            )
+        }
+    }
+
+    public func failClaudeJob(id: UUID, message: String, completedAt: Date) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET status = ?, error_message = ?, completed_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                arguments: [
+                    RemoteClaudeJobStatus.failed.rawValue,
+                    message,
+                    completedAt.timeIntervalSince1970,
+                    id.uuidString,
+                    RemoteClaudeJobStatus.running.rawValue,
+                ]
+            )
+        }
+    }
+
     private static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createApprovals") { db in
@@ -187,6 +328,20 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
         migrator.registerMigration("addApprovalQuestions") { db in
             try db.alter(table: "approvals") { table in
                 table.add(column: "questions_json", .text)
+            }
+        }
+        migrator.registerMigration("createRemoteClaudeJobs") { db in
+            try db.create(table: "remote_claude_jobs", ifNotExists: true) { table in
+                table.column("id", .text).primaryKey()
+                table.column("prompt", .text).notNull()
+                table.column("working_directory", .text).notNull()
+                table.column("status", .text).notNull().indexed()
+                table.column("response", .text)
+                table.column("error_message", .text)
+                table.column("session_id", .text)
+                table.column("created_at", .double).notNull().indexed()
+                table.column("started_at", .double)
+                table.column("completed_at", .double)
             }
         }
         return migrator
@@ -216,6 +371,41 @@ public actor SQLiteApprovalRepository: ApprovalRepository {
             return nil
         }
         return try decodeApproval(row)
+    }
+
+    private static func fetchClaudeJob(db: Database, id: UUID) throws -> RemoteClaudeJob? {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: "SELECT * FROM remote_claude_jobs WHERE id = ?",
+            arguments: [id.uuidString]
+        ) else {
+            return nil
+        }
+        return try decodeClaudeJob(row)
+    }
+
+    private static func decodeClaudeJob(_ row: Row) throws -> RemoteClaudeJob {
+        let idString: String = row["id"]
+        let statusString: String = row["status"]
+        guard let id = UUID(uuidString: idString),
+              let status = RemoteClaudeJobStatus(rawValue: statusString)
+        else {
+            throw ApprovalPersistenceError.corruptRecord
+        }
+        let startedAt: Double? = row["started_at"]
+        let completedAt: Double? = row["completed_at"]
+        return RemoteClaudeJob(
+            id: id,
+            prompt: row["prompt"],
+            workingDirectory: row["working_directory"],
+            status: status,
+            response: row["response"],
+            errorMessage: row["error_message"],
+            sessionID: row["session_id"],
+            createdAt: Date(timeIntervalSince1970: row["created_at"]),
+            startedAt: startedAt.map(Date.init(timeIntervalSince1970:)),
+            completedAt: completedAt.map(Date.init(timeIntervalSince1970:))
+        )
     }
 
     private static func decodeApproval(_ row: Row) throws -> Approval {

@@ -4,7 +4,7 @@ Local Swift MCP servers used by WorkHarness and related agent tooling. Each serv
 
 ## RemoteMCPServer
 
-`RemoteMCPServer` lets an MCP client pause on `ask_user`, display the decision in Safari, and return the exact option selected by the user.
+`RemoteMCPServer` lets an MCP client pause on `ask_user`, display the decision in a mobile browser, and return the exact option selected by the user. Its `/claude` page also queues full Claude Code tasks on the Mac and returns their responses to the browser.
 
 ### Installed setup
 
@@ -47,6 +47,8 @@ swift test --filter RemoteTests
 | `REMOTE_TOKEN_FILE` | none | Preferred path to a file containing the access token. |
 | `REMOTE_DB_PATH` | `~/Library/Application Support/Remote/approval.sqlite` | SQLite database path. |
 | `REMOTE_TIMEOUT_SECONDS` | `300` | Maximum wait for a decision, from 1 to 3,600 seconds. |
+| `REMOTE_CLAUDE_PATH` | `~/.local/bin/claude` | Claude Code executable used by the remote task worker. |
+| `REMOTE_CLAUDE_WORKING_DIRECTORY` | `~/Documents/ThisIsMy/Programming/AI` | Working directory for remotely submitted Claude tasks. |
 
 For a development run, generate a token without committing or printing it:
 
@@ -101,7 +103,10 @@ Open this page on the iPhone while Tailscale is connected:
 
 ```text
 http://100.123.251.91:3010/approvals
+http://100.123.251.91:3010/claude
 ```
+
+The Claude page stores requests in SQLite and runs them one at a time. Jobs survive a web-service restart, and the page polls their queued, running, completed, or failed state without disturbing the request field. Claude is intentionally started with `bypassPermissions`, so a request submitted through this page has the same broad ability to read and change files, run commands, access the network, and call configured MCP tools as a fully trusted local Claude Code task. Keep the page private to the authenticated Tailscale connection.
 
 Run `/remote-start` in Claude Code for the initial login, then paste the token from Universal Clipboard. Safari receives a 90-day HttpOnly authentication cookie derived with HMAC from the token. It remains valid across `/remote-stop`, `/remote-start`, server upgrades, and Mac restarts; rotating the token invalidates it immediately. Saving the token in iCloud Passwords is a useful fallback if Safari data is cleared while away from the Mac.
 

@@ -30,6 +30,8 @@ struct RemoteConfiguration: Sendable {
     let token: String
     let databasePath: String
     let timeout: TimeInterval
+    let claudeExecutablePath: String
+    let claudeWorkingDirectory: String
 
     static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
         let service = try RemoteServiceConfiguration.load(environment: environment)
@@ -60,12 +62,34 @@ struct RemoteConfiguration: Sendable {
         guard token.count >= 32 else {
             throw ConfigurationError.missingOrWeakToken
         }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let claudeExecutablePath = NSString(
+            string: environment["REMOTE_CLAUDE_PATH"]
+                ?? home.appendingPathComponent(".local/bin/claude").path
+        ).expandingTildeInPath
+        let claudeWorkingDirectory = NSString(
+            string: environment["REMOTE_CLAUDE_WORKING_DIRECTORY"]
+                ?? home.appendingPathComponent("Documents/ThisIsMy/Programming/AI").path
+        ).expandingTildeInPath
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.isExecutableFile(atPath: claudeExecutablePath) else {
+            throw ConfigurationError.invalidValue("REMOTE_CLAUDE_PATH")
+        }
+        guard FileManager.default.fileExists(
+            atPath: claudeWorkingDirectory,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            throw ConfigurationError.invalidValue("REMOTE_CLAUDE_WORKING_DIRECTORY")
+        }
         return Self(
             host: host,
             port: port,
             token: token,
             databasePath: service.databasePath,
-            timeout: service.timeout
+            timeout: service.timeout,
+            claudeExecutablePath: claudeExecutablePath,
+            claudeWorkingDirectory: claudeWorkingDirectory
         )
     }
 

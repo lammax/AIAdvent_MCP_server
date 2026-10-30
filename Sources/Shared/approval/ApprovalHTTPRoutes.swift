@@ -78,7 +78,8 @@ public struct ApprovalHTTPAuthorization: Sendable {
 public func configureApprovalHTTPRoutes(
     app: Application,
     service: ApprovalService,
-    authorization: ApprovalHTTPAuthorization
+    authorization: ApprovalHTTPAuthorization,
+    claudeService: RemoteClaudeJobService? = nil
 ) {
     app.get { request in
         request.redirect(to: "/approvals")
@@ -148,6 +149,47 @@ public func configureApprovalHTTPRoutes(
             return ApprovalResponse(approval)
         } catch let error as ApprovalError {
             throw abort(for: error)
+        }
+    }
+
+    app.get("claude") { request -> Response in
+        guard authorization.isAuthorized(request) else {
+            return request.redirect(to: "/login")
+        }
+        guard claudeService != nil else {
+            return Response(status: .notFound)
+        }
+        return htmlResponse(ApprovalWebPage.claude())
+    }
+
+    app.get("claude", "jobs") { request async throws -> RemoteClaudeJobListResponse in
+        try requireAuthorization(request, authorization: authorization)
+        guard let claudeService else { throw Abort(.notFound) }
+        return RemoteClaudeJobListResponse(jobs: try await claudeService.recentJobs())
+    }
+
+    app.get("claude", "jobs", ":jobID") { request async throws -> RemoteClaudeJobResponse in
+        try requireAuthorization(request, authorization: authorization)
+        guard let claudeService else { throw Abort(.notFound) }
+        guard let rawID = request.parameters.get("jobID"),
+              let id = UUID(uuidString: rawID)
+        else {
+            throw Abort(.badRequest, reason: "Invalid Claude job ID.")
+        }
+        guard let job = try await claudeService.job(id: id) else {
+            throw Abort(.notFound, reason: "Claude job was not found.")
+        }
+        return RemoteClaudeJobResponse(job)
+    }
+
+    app.post("claude", "jobs") { request async throws -> RemoteClaudeJobResponse in
+        try requireAuthorization(request, authorization: authorization)
+        guard let claudeService else { throw Abort(.notFound) }
+        let body = try request.content.decode(RemoteClaudeSubmitRequest.self)
+        do {
+            return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt))
+        } catch let error as RemoteClaudeJobError {
+            throw Abort(.badRequest, reason: error.localizedDescription)
         }
     }
 }
@@ -237,6 +279,44 @@ public struct ApprovalListResponse: Content, Sendable {
     }
 }
 
+private struct RemoteClaudeSubmitRequest: Content, Sendable {
+    let prompt: String
+}
+
+public struct RemoteClaudeJobListResponse: Content, Sendable {
+    public let jobs: [RemoteClaudeJobResponse]
+
+    public init(jobs: [RemoteClaudeJob]) {
+        self.jobs = jobs.map(RemoteClaudeJobResponse.init)
+    }
+}
+
+public struct RemoteClaudeJobResponse: Content, Sendable {
+    public let id: UUID
+    public let prompt: String
+    public let workingDirectory: String
+    public let status: RemoteClaudeJobStatus
+    public let response: String?
+    public let errorMessage: String?
+    public let sessionID: String?
+    public let createdAt: Date
+    public let startedAt: Date?
+    public let completedAt: Date?
+
+    public init(_ job: RemoteClaudeJob) {
+        id = job.id
+        prompt = job.prompt
+        workingDirectory = job.workingDirectory
+        status = job.status
+        response = job.response
+        errorMessage = job.errorMessage
+        sessionID = job.sessionID
+        createdAt = job.createdAt
+        startedAt = job.startedAt
+        completedAt = job.completedAt
+    }
+}
+
 public struct ApprovalResponse: Content, Sendable {
     public let id: UUID
     public let questions: [ApprovalQuestion]
@@ -308,7 +388,7 @@ private enum ApprovalWebPage {
           <main class="shell">
             <header>
               <div><p class="eyebrow">Remote</p><h1>Pending approvals</h1></div>
-              <form method="post" action="/logout"><button class="secondary" type="submit">Sign out</button></form>
+              <nav><a class="secondary action-link" href="/claude">Claude</a><form method="post" action="/logout"><button class="secondary" type="submit">Sign out</button></form></nav>
             </header>
             <section id="state" class="card"><p class="muted">Loading…</p></section>
           </main>
@@ -428,12 +508,146 @@ private enum ApprovalWebPage {
         """
     }
 
+    static func claude() -> String {
+        """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <title>Remote Claude</title>
+          <style>\(sharedStyles)</style>
+        </head>
+        <body>
+          <main class="shell">
+            <header>
+              <div><p class="eyebrow">Remote</p><h1>Claude</h1></div>
+              <nav><a class="secondary action-link" href="/approvals">Approvals</a><form method="post" action="/logout"><button class="secondary" type="submit">Sign out</button></form></nav>
+            </header>
+            <section class="card composer">
+              <form id="prompt-form">
+                <label for="prompt">Request</label>
+                <textarea id="prompt" name="prompt" maxlength="20000" rows="7" placeholder="Ask Claude to work on your Mac…" required></textarea>
+                <button id="send" type="submit">Send to Claude</button>
+                <p id="composer-message" class="muted" aria-live="polite"></p>
+              </form>
+            </section>
+            <section id="jobs" class="job-list" aria-live="polite"><div class="card"><p class="muted">Loading…</p></div></section>
+          </main>
+          <script>
+          const form = document.getElementById('prompt-form');
+          const promptInput = document.getElementById('prompt');
+          const sendButton = document.getElementById('send');
+          const composerMessage = document.getElementById('composer-message');
+          const jobsState = document.getElementById('jobs');
+          let submittingPrompt = false;
+          let renderedJobs = null;
+
+          function node(tag, className, text) {
+            const element = document.createElement(tag);
+            if (className) element.className = className;
+            if (text !== undefined) element.textContent = text;
+            return element;
+          }
+
+          function formatDate(value) {
+            if (!value) return '';
+            try { return new Date(value).toLocaleString(); } catch (_) { return ''; }
+          }
+
+          async function loadJobs() {
+            try {
+              const response = await fetch('/claude/jobs', { credentials: 'same-origin' });
+              if (response.status === 401) { window.location = '/login'; return; }
+              if (!response.ok) throw new Error('Request failed');
+              const payload = await response.json();
+              const jobs = payload.jobs || [];
+              const signature = JSON.stringify(jobs);
+              if (signature === renderedJobs) return;
+              renderedJobs = signature;
+              renderJobs(jobs);
+            } catch (_) {
+              if (!jobsState.children.length) {
+                jobsState.append(node('div', 'card error', 'Unable to load Claude requests. Retrying…'));
+              }
+            }
+          }
+
+          function renderJobs(jobs) {
+            jobsState.replaceChildren();
+            if (!jobs.length) {
+              const empty = node('div', 'card');
+              empty.append(node('p', 'empty', 'No Claude requests yet'));
+              jobsState.append(empty);
+              return;
+            }
+            jobs.forEach((job) => {
+              const article = node('article', 'card job');
+              const heading = node('div', 'job-heading');
+              heading.append(
+                node('span', `status status-${job.status}`, job.status),
+                node('time', 'muted', formatDate(job.createdAt))
+              );
+              article.append(heading, node('h2', 'job-prompt', job.prompt));
+              if (job.status === 'queued') {
+                article.append(node('p', 'muted', 'Waiting for the local Claude worker…'));
+              } else if (job.status === 'running') {
+                article.append(node('p', 'muted', 'Claude is working. Approval questions will appear on the Approvals page.'));
+              } else if (job.status === 'completed') {
+                article.append(node('pre', 'job-response', job.response || 'Completed without a text response.'));
+              } else if (job.status === 'failed') {
+                article.append(node('pre', 'job-error', job.errorMessage || 'Claude failed.'));
+              }
+              jobsState.append(article);
+            });
+          }
+
+          form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            if (submittingPrompt) return;
+            const prompt = promptInput.value.trim();
+            if (!prompt) return;
+            submittingPrompt = true;
+            sendButton.disabled = true;
+            sendButton.textContent = 'Sending…';
+            composerMessage.textContent = '';
+            try {
+              const response = await fetch('/claude/jobs', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt })
+              });
+              if (response.status === 401) { window.location = '/login'; return; }
+              if (!response.ok) throw new Error('Submit failed');
+              promptInput.value = '';
+              composerMessage.textContent = 'Request queued.';
+              renderedJobs = null;
+              await loadJobs();
+            } catch (_) {
+              composerMessage.textContent = 'The request could not be queued.';
+              composerMessage.className = 'error';
+            } finally {
+              submittingPrompt = false;
+              sendButton.disabled = false;
+              sendButton.textContent = 'Send to Claude';
+            }
+          });
+
+          loadJobs(); setInterval(loadJobs, 2000);
+          </script>
+        </body>
+        </html>
+        """
+    }
+
     private static let sharedStyles = """
     :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: #f2f4f7; color: #111827; padding: max(20px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
     .shell, .login-card { width: min(100%, 680px); margin: 0 auto; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    nav { display: flex; align-items: center; gap: 8px; }
+    nav form { margin: 0; }
     h1 { margin: 2px 0 0; font-size: clamp(1.7rem, 7vw, 2.4rem); line-height: 1.1; }
     .eyebrow { margin: 0; color: #2563eb; font-size: .78rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
     .card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
@@ -444,6 +658,7 @@ private enum ApprovalWebPage {
     button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; }
     button:disabled { opacity: .55; }
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
+    .action-link { display: inline-flex; align-items: center; min-height: 42px; border-radius: 13px; padding: 10px 14px; background: #e2e8f0; color: #1e293b; font-weight: 750; text-decoration: none; }
     .approval + .approval { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
     .question-block { border: 0; padding: 0; margin: 0; min-width: 0; }
     .question-block + .question-block { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
@@ -455,12 +670,29 @@ private enum ApprovalWebPage {
     .empty, .success { margin: 0; font-size: 1.15rem; font-weight: 750; }
     .success { color: #047857; }
     .error { color: #b91c1c; font-weight: 650; }
+    .composer { margin-bottom: 18px; }
+    .composer label { margin-top: 0; }
+    .composer textarea { margin-top: 0; }
+    .job-list { display: grid; gap: 14px; }
+    .job-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .status { border-radius: 999px; padding: 5px 9px; font-size: .75rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+    .status-queued { background: #fef3c7; color: #92400e; }
+    .status-running { background: #dbeafe; color: #1d4ed8; }
+    .status-completed { background: #d1fae5; color: #047857; }
+    .status-failed { background: #fee2e2; color: #b91c1c; }
+    .job-prompt { margin: 14px 0 0; font-size: 1rem; line-height: 1.5; white-space: pre-wrap; }
+    .job-response, .job-error { margin: 16px 0 0; padding: 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
+    .job-response { background: #ecfdf5; color: #064e3b; }
+    .job-error { background: #fef2f2; color: #991b1b; }
     @media (prefers-color-scheme: dark) {
       body { background: #0f172a; color: #f8fafc; }
       .card { background: #1e293b; box-shadow: none; }
       .muted { color: #94a3b8; }
       input[type=password], textarea, .option { border-color: #475569; background: #0f172a; color: #f8fafc; }
       button.secondary { background: #334155; color: #f8fafc; }
+      .action-link { background: #334155; color: #f8fafc; }
+      .job-response { background: #052e2b; color: #d1fae5; }
+      .job-error { background: #450a0a; color: #fee2e2; }
     }
     """
 }

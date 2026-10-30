@@ -16,6 +16,10 @@
         <string>warning</string>
         <key>REMOTE_DB_PATH</key>
         <string>/Users/lammax/Library/Application Support/Remote/approval.sqlite</string>
+        <key>REMOTE_CLAUDE_PATH</key>
+        <string>/Users/lammax/.local/bin/claude</string>
+        <key>REMOTE_CLAUDE_WORKING_DIRECTORY</key>
+        <string>/Users/lammax/Documents/ThisIsMy/Programming/AI</string>
         <key>REMOTE_HOST</key>
         <string>100.123.251.91</string>
         <key>REMOTE_PORT</key>

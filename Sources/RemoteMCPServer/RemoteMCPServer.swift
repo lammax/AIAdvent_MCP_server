@@ -254,8 +254,19 @@ enum RemoteMCPServer {
 
         let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
         let service = ApprovalService(repository: repository, timeout: configuration.timeout)
+        let claudeService = RemoteClaudeJobService(
+            repository: repository,
+            runner: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
+            workingDirectory: configuration.claudeWorkingDirectory
+        )
+        try await claudeService.start()
         let authorization = ApprovalHTTPAuthorization(token: configuration.token)
-        configureApprovalHTTPRoutes(app: app, service: service, authorization: authorization)
+        configureApprovalHTTPRoutes(
+            app: app,
+            service: service,
+            authorization: authorization,
+            claudeService: claudeService
+        )
 
         let mcpServer = await makeRemoteMCPServer(service: service)
         let authority = httpAuthority(host: configuration.host, port: configuration.port)

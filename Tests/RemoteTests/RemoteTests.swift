@@ -410,6 +410,85 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(response.headers.first(name: "Cache-Control"), "no-store, no-cache, must-revalidate")
     }
 
+    func testRemoteClaudeJobRunsAndPersistsResponse() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let service = RemoteClaudeJobService(
+            repository: fixture.repository,
+            runner: StubClaudeRunner(),
+            workingDirectory: fixture.directory.path
+        )
+        try await service.start()
+
+        let submitted = try await service.submit(prompt: "  Inspect the project  ")
+        XCTAssertEqual(submitted.prompt, "Inspect the project")
+        XCTAssertEqual(submitted.status, .queued)
+
+        var completed: RemoteClaudeJob?
+        for _ in 0..<100 {
+            let current = try await service.job(id: submitted.id)
+            if current?.status == .completed {
+                completed = current
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        XCTAssertEqual(completed?.response, "Done: Inspect the project")
+        XCTAssertEqual(completed?.sessionID, "stub-session")
+        XCTAssertNotNil(completed?.startedAt)
+        XCTAssertNotNil(completed?.completedAt)
+    }
+
+    func testRemoteClaudeHTTPPageQueuesRequest() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let claudeService = RemoteClaudeJobService(
+            repository: fixture.repository,
+            runner: StubClaudeRunner(),
+            workingDirectory: fixture.directory.path
+        )
+        try await claudeService.start()
+        let app = try await makeApplication(
+            service: fixture.service,
+            token: fixture.token,
+            claudeService: claudeService
+        )
+        defer { Task { try? await app.asyncShutdown() } }
+
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        let page = try await app.sendRequest(.GET, "/claude", headers: headers)
+        XCTAssertEqual(page.status, .ok)
+        XCTAssertTrue(
+            page.body.getString(at: page.body.readerIndex, length: page.body.readableBytes)?
+                .contains("Send to Claude") == true
+        )
+
+        headers.contentType = .json
+        let submitted = try await app.sendRequest(
+            .POST,
+            "/claude/jobs",
+            headers: headers,
+            body: byteBuffer(#"{"prompt":"Review Remote"}"#)
+        )
+        XCTAssertEqual(submitted.status, .ok)
+        let submittedJob = try submitted.content.decode(RemoteClaudeJobResponse.self)
+        XCTAssertEqual(submittedJob.prompt, "Review Remote")
+
+        var completed = false
+        for _ in 0..<100 {
+            let response = try await app.sendRequest(.GET, "/claude/jobs", headers: headers)
+            let jobs = try response.content.decode(RemoteClaudeJobListResponse.self).jobs
+            if jobs.first(where: { $0.id == submittedJob.id })?.status == .completed {
+                completed = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(completed)
+    }
+
     func testLoginCookieSurvivesServerRestartAndRejectsTokenRotation() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
@@ -480,17 +559,23 @@ final class RemoteTests: XCTestCase {
                 timeout: timeout,
                 pollInterval: pollInterval
             ),
+            repository: repository,
             directory: directory,
             token: "test-token-that-is-at-least-32-characters"
         )
     }
 
-    private func makeApplication(service: ApprovalService, token: String) async throws -> Application {
+    private func makeApplication(
+        service: ApprovalService,
+        token: String,
+        claudeService: RemoteClaudeJobService? = nil
+    ) async throws -> Application {
         let app = try await Application.make(.testing)
         configureApprovalHTTPRoutes(
             app: app,
             service: service,
-            authorization: ApprovalHTTPAuthorization(token: token)
+            authorization: ApprovalHTTPAuthorization(token: token),
+            claudeService: claudeService
         )
         return app
     }
@@ -504,10 +589,21 @@ final class RemoteTests: XCTestCase {
 
 private struct Fixture: Sendable {
     let service: ApprovalService
+    let repository: SQLiteApprovalRepository
     let directory: URL
     let token: String
 
     func remove() {
         try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+private struct StubClaudeRunner: RemoteClaudeJobRunning {
+    func run(job: RemoteClaudeJob) async throws -> RemoteClaudeJobResult {
+        try await Task.sleep(for: .milliseconds(10))
+        return RemoteClaudeJobResult(
+            response: "Done: \(job.prompt)",
+            sessionID: "stub-session"
+        )
     }
 }
