@@ -364,6 +364,8 @@ private enum ApprovalWebPage {
             <p class="muted">Enter the access token configured on your Mac.</p>
             \(errorMarkup)
             <form method="post" action="/login">
+              <label for="username">Username</label>
+              <input id="username" name="username" type="text" value="remote" autocomplete="username" autocapitalize="none" spellcheck="false" readonly>
               <label for="token">Access token</label>
               <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
               <button type="submit">Continue</button>
@@ -653,7 +655,8 @@ private enum ApprovalWebPage {
     .card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
     .login-card { margin-top: 10vh; }
     label { display: block; font-weight: 650; margin: 18px 0 8px; }
-    input[type=password], textarea { width: 100%; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font: inherit; }
+    input[type=text], input[type=password], textarea { width: 100%; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font: inherit; }
+    input[readonly] { background: #f8fafc; color: #475569; }
     textarea { margin-top: 14px; resize: vertical; }
     button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; }
     button:disabled { opacity: .55; }

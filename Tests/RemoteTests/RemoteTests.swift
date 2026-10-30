@@ -495,12 +495,19 @@ final class RemoteTests: XCTestCase {
         let app = try await makeApplication(service: fixture.service, token: fixture.token)
         defer { Task { try? await app.asyncShutdown() } }
 
+        let loginPage = try await app.sendRequest(.GET, "/login")
+        let loginHTML = loginPage.body.string
+        XCTAssertTrue(loginHTML.contains("name=\"username\""))
+        XCTAssertTrue(loginHTML.contains("value=\"remote\""))
+        XCTAssertTrue(loginHTML.contains("autocomplete=\"username\""))
+        XCTAssertTrue(loginHTML.contains("autocomplete=\"current-password\""))
+
         let formHeaders: HTTPHeaders = ["Content-Type": "application/x-www-form-urlencoded"]
         let rejected = try await app.sendRequest(
             .POST,
             "/login",
             headers: formHeaders,
-            body: byteBuffer("token=wrong")
+            body: byteBuffer("username=remote&token=wrong")
         )
         XCTAssertEqual(rejected.status, .unauthorized)
 
@@ -508,7 +515,7 @@ final class RemoteTests: XCTestCase {
             .POST,
             "/login",
             headers: formHeaders,
-            body: byteBuffer("token=\(fixture.token)")
+            body: byteBuffer("username=remote&token=\(fixture.token)")
         )
         XCTAssertTrue(accepted.status == .seeOther || accepted.status == .temporaryRedirect)
         let cookie = accepted.headers["Set-Cookie"].joined(separator: ";")
