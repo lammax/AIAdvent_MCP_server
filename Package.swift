@@ -49,6 +49,10 @@ let package = Package(
         .executable(
             name: "LLMGatewayMCPServer",
             targets: ["LLMGatewayMCPServer"]
+        ),
+        .executable(
+            name: "RemoteMCPServer",
+            targets: ["RemoteMCPServer"]
         )
     ],
     dependencies: [
@@ -158,9 +162,26 @@ let package = Package(
             ]
         ),
 
+        .executableTarget(
+            name: "RemoteMCPServer",
+            dependencies: [
+                "Shared",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "MCP", package: "swift-sdk")
+            ]
+        ),
+
         .testTarget(
             name: "LLMGatewayTests",
             dependencies: ["Shared"]
+        ),
+
+        .testTarget(
+            name: "RemoteTests",
+            dependencies: [
+                "Shared",
+                .product(name: "XCTVapor", package: "vapor")
+            ]
         )
     ]
 )

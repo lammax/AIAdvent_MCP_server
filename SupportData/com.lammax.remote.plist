@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lammax.remote</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lammax/Library/Application Support/Remote/bin/RemoteMCPServer</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LOG_LEVEL</key>
+        <string>warning</string>
+        <key>REMOTE_DB_PATH</key>
+        <string>/Users/lammax/Library/Application Support/Remote/approval.sqlite</string>
+        <key>REMOTE_HOST</key>
+        <string>100.123.251.91</string>
+        <key>REMOTE_PORT</key>
+        <string>3010</string>
+        <key>REMOTE_TIMEOUT_SECONDS</key>
+        <string>300</string>
+        <key>REMOTE_TOKEN_FILE</key>
+        <string>/Users/lammax/Library/Application Support/Remote/token</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/lammax/Library/Application Support/Remote</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/lammax/Library/Logs/Remote/remote.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/lammax/Library/Logs/Remote/remote.err.log</string>
+</dict>
+</plist>

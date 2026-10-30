@@ -33,6 +33,11 @@ playground.xcworkspace
 
 .mcp_server/
 
+# Local service secrets
+.env
+.env.*
+!.env.example
+
 # CocoaPods
 #
 # We recommend against adding the Pods directory to your .gitignore. However
