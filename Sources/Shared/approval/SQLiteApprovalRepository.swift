@@ -490,18 +490,34 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             guard let responses = answersByID[question.id] else {
                 throw ApprovalError.invalidResponse
             }
-            try validate(responses: responses, for: question)
+            let normalizedResponses: [String]
+            if question.kind == .text,
+               questions.count > 1,
+               responses == [""] {
+                normalizedResponses = []
+            } else {
+                normalizedResponses = responses
+            }
+            try validate(
+                responses: normalizedResponses,
+                for: question,
+                textRequired: questions.count == 1
+            )
             return ApprovalQuestion(
                 id: question.id,
                 question: question.question,
                 kind: question.kind,
                 options: question.options,
-                responses: responses
+                responses: normalizedResponses
             )
         }
     }
 
-    private static func validate(responses: [String], for question: ApprovalQuestion) throws {
+    private static func validate(
+        responses: [String],
+        for question: ApprovalQuestion,
+        textRequired: Bool
+    ) throws {
         switch question.kind {
         case .singleSelect:
             guard responses.count == 1,
@@ -518,6 +534,9 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 throw ApprovalError.invalidResponse
             }
         case .text:
+            if !textRequired, responses.isEmpty {
+                return
+            }
             guard responses.count == 1 else { throw ApprovalError.invalidResponse }
             guard !responses[0].isEmpty else { throw ApprovalError.emptyResponse }
             guard responses[0].count <= 4_000 else { throw ApprovalError.responseTooLong }

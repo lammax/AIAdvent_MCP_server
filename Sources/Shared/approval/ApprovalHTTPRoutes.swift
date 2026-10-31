@@ -439,10 +439,13 @@ private enum ApprovalWebPage {
               const form = node('form', 'options');
               approval.questions.forEach((question) => {
                 const fieldset = node('fieldset', 'question-block');
-                fieldset.append(node('legend', 'question', question.question));
+                const textRequired = approval.questions.length === 1;
+                const title = question.kind === 'text' && !textRequired
+                  ? `${question.question} (optional)` : question.question;
+                fieldset.append(node('legend', 'question', title));
                 if (question.kind === 'text') {
                   const input = document.createElement('textarea');
-                  input.name = question.id; input.required = true; input.maxLength = 4000;
+                  input.name = question.id; input.required = textRequired; input.maxLength = 4000;
                   input.rows = 5; input.placeholder = 'Type your answer…';
                   fieldset.append(input);
                 } else {
@@ -475,10 +478,12 @@ private enum ApprovalWebPage {
             const data = new FormData(form);
             const answers = [];
             for (const question of approval.questions) {
+              const textValue = question.kind === 'text'
+                ? String(data.get(question.id) || '').trim() : '';
               const responses = question.kind === 'text'
-                ? [String(data.get(question.id) || '').trim()]
-                : data.getAll(question.id).map(String);
-              if (!responses.length || responses.some((value) => !value)) {
+                ? (textValue ? [textValue] : []) : data.getAll(question.id).map(String);
+              const responseRequired = question.kind !== 'text' || approval.questions.length === 1;
+              if (responseRequired && (!responses.length || responses.some((value) => !value))) {
                 form.prepend(node('p', 'error', question.kind === 'multi_select'
                   ? 'Select at least one option for every multi-select question.'
                   : 'Answer every question.'));

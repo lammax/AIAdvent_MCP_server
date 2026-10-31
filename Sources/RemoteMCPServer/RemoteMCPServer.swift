@@ -99,7 +99,7 @@ private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
         .init(tools: [
             Tool(
                 name: "ask_user",
-                description: "Ask one or more questions in a single remote request. Each question can be single-select, multi-select, or free text. Waits for the human response and never invents an answer. Prefer the questions array; legacy question/mode/options fields remain supported.",
+                description: "Ask one or more questions in a single remote request. Each question can be single-select, multi-select, or free text. A lone free-text question requires an answer; free-text fields in a multi-question request are optional comments. Waits for the human response and never invents an answer. Prefer the questions array; legacy question/mode/options fields remain supported.",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([

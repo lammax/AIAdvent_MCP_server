@@ -163,6 +163,35 @@ final class RemoteTests: XCTestCase {
         ])
     }
 
+    func testTextResponseIsOptionalOnlyInAMixedRequest() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let approval = try await fixture.service.create(questions: [
+            ApprovalQuestion(
+                id: "choice",
+                question: "Choose architecture",
+                kind: .singleSelect,
+                options: ["MVVM", "TCA"]
+            ),
+            ApprovalQuestion(
+                id: "comment",
+                question: "Additional notes",
+                kind: .text
+            )
+        ])
+
+        let answered = try await fixture.service.respond(
+            id: approval.id,
+            answers: [
+                ApprovalAnswer(id: "choice", responses: ["TCA"]),
+                ApprovalAnswer(id: "comment", responses: [])
+            ]
+        )
+
+        XCTAssertEqual(answered.questions.map(\.responses), [["TCA"], []])
+        XCTAssertNil(answered.questions[1].response)
+    }
+
     func testInvalidApprovalInputIsRejectedBeforePersistence() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
@@ -407,6 +436,8 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(html.contains("if (formDirty && state.querySelector('form')) return;"))
         XCTAssertTrue(html.contains("form.addEventListener('focusin'"))
         XCTAssertTrue(html.contains("form.addEventListener('input'"))
+        XCTAssertTrue(html.contains("input.required = textRequired"))
+        XCTAssertTrue(html.contains("approval.questions.length === 1"))
         XCTAssertEqual(response.headers.first(name: "Cache-Control"), "no-store, no-cache, must-revalidate")
     }
 

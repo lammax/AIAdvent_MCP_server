@@ -87,7 +87,7 @@ ask_user(
 )
 ```
 
-All questions are displayed in one iPhone form and submitted atomically. Selection types require options; text questions omit them. Answers are returned in the original question order and matched by `id`. The original `ask_user(question, options)` form and its optional `mode` remain supported for compatibility. Timeout, cancellation, validation, and persistence failures are explicit errors; the server never invents an answer.
+All questions are displayed in one iPhone form and submitted atomically. Selection types require options; text questions omit them. A text answer is required when it is the only question and is an optional comment when it appears in a multi-question request. Answers are returned in the original question order and matched by `id`; an omitted optional text answer has an empty `responses` array. The original `ask_user(question, options)` form and its optional `mode` remain supported for compatibility. Timeout, cancellation, validation, and persistence failures are explicit errors; the server never invents an answer.
 
 The source files for the personal Claude Code commands live in `ClaudeSkills/`. Install them under `~/.claude/skills/` and restart an existing Claude Code session when the MCP schema changes. The Codex-specific `remote-mode` source lives in `CodexSkills/`; install it under `~/.codex/skills/`. Register the same stdio server in Codex with:
 
