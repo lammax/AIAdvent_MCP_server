@@ -30,6 +30,7 @@ The personal Claude Code commands are:
 - `/remote-status` — show service health.
 - `/remote-stop` — stop it until the next login or manual start.
 - `/remote-test` — verify single-select, multi-select, and free-text responses on the iPhone.
+- `/remote-push [message]` — send one real approval-backed Web Push request and wait for its exact acknowledgement.
 
 The model-invoked `remote-mode` skill accepts two short handoffs: `Я ушёл` starts Remote and `Я здесь` stops it. It also understands explicit longer office/Remote commands. It only acts when the user sends such a message; it does not perform location tracking.
 
