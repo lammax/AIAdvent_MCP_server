@@ -1,7 +1,10 @@
 import Foundation
+import CryptoKit
 import GRDB
 
-public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobRepository {
+public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobRepository,
+    RemotePushRepository
+{
     private let dbQueue: DatabaseQueue
     public let path: String
 
@@ -22,6 +25,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
 
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
+        configuration.foreignKeysEnabled = true
         self.dbQueue = try DatabaseQueue(path: self.path, configuration: configuration)
         try Self.makeMigrator().migrate(dbQueue)
         try FileManager.default.setAttributes(
@@ -63,6 +67,21 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     approval.createdAt.timeIntervalSince1970,
                     approval.expiresAt.timeIntervalSince1970,
                     approval.answeredAt?.timeIntervalSince1970
+                ]
+            )
+            let eventID = UUID()
+            try db.execute(
+                sql: """
+                INSERT INTO remote_push_outbox (
+                    id, event_key, kind, approval_id, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    eventID.uuidString,
+                    "approval.created:\(approval.id.uuidString.lowercased())",
+                    RemotePushEventKind.approvalCreated.rawValue,
+                    approval.id.uuidString,
+                    approval.createdAt.timeIntervalSince1970,
                 ]
             )
         }
@@ -302,6 +321,450 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         }
     }
 
+    public func upsertPushSubscription(
+        endpoint: String,
+        p256dh: String,
+        auth: String,
+        applicationServerKey: String?,
+        deviceLabel: String?,
+        now: Date
+    ) async throws -> RemotePushSubscription {
+        try await dbQueue.write { db in
+            let id = UUID()
+            let vapidKeyFingerprint = applicationServerKey.map(Self.vapidKeyFingerprint)
+            try db.execute(
+                sql: """
+                INSERT INTO remote_push_subscriptions (
+                    id, endpoint, p256dh, auth, application_server_key,
+                    vapid_key_fingerprint, device_label,
+                    active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(endpoint) DO UPDATE SET
+                    p256dh = excluded.p256dh,
+                    auth = excluded.auth,
+                    application_server_key = excluded.application_server_key,
+                    vapid_key_fingerprint = excluded.vapid_key_fingerprint,
+                    device_label = excluded.device_label,
+                    active = 1,
+                    updated_at = excluded.updated_at,
+                    last_error = NULL
+                """,
+                arguments: [
+                    id.uuidString,
+                    endpoint,
+                    p256dh,
+                    auth,
+                    applicationServerKey,
+                    vapidKeyFingerprint,
+                    deviceLabel,
+                    now.timeIntervalSince1970,
+                    now.timeIntervalSince1970,
+                ]
+            )
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM remote_push_subscriptions WHERE endpoint = ?",
+                arguments: [endpoint]
+            ) else {
+                throw ApprovalPersistenceError.corruptRecord
+            }
+            return try Self.decodePushSubscription(row)
+        }
+    }
+
+    public func deactivatePushSubscription(endpoint: String, now: Date) async throws {
+        try await dbQueue.write { db in
+            let eventIDs = try String.fetchAll(
+                db,
+                sql: """
+                SELECT DISTINCT d.event_id
+                FROM remote_push_deliveries d
+                JOIN remote_push_subscriptions s ON s.id = d.subscription_id
+                WHERE s.endpoint = ?
+                  AND d.status IN ('pending', 'retry', 'leased')
+                """,
+                arguments: [endpoint]
+            )
+            try db.execute(
+                sql: """
+                UPDATE remote_push_subscriptions
+                SET active = 0, updated_at = ?
+                WHERE endpoint = ?
+                """,
+                arguments: [now.timeIntervalSince1970, endpoint]
+            )
+            try db.execute(
+                sql: """
+                UPDATE remote_push_deliveries
+                SET status = 'failed', lease_until = NULL, last_error = 'subscription disabled'
+                WHERE subscription_id IN (
+                    SELECT id FROM remote_push_subscriptions WHERE endpoint = ?
+                )
+                  AND status IN ('pending', 'retry', 'leased')
+                """,
+                arguments: [endpoint]
+            )
+            for eventID in eventIDs {
+                try Self.completeOutboxIfTerminal(db: db, eventID: eventID, now: now)
+            }
+        }
+    }
+
+    public func activePushSubscriptions() async throws -> [RemotePushSubscription] {
+        try await dbQueue.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT * FROM remote_push_subscriptions
+                WHERE active = 1
+                ORDER BY created_at ASC
+                """
+            ).map(Self.decodePushSubscription)
+        }
+    }
+
+    public func enqueueTestPush(now: Date) async throws -> UUID {
+        try await dbQueue.write { db in
+            let id = UUID()
+            try db.execute(
+                sql: """
+                INSERT INTO remote_push_outbox (
+                    id, event_key, kind, approval_id, created_at
+                ) VALUES (?, ?, ?, NULL, ?)
+                """,
+                arguments: [
+                    id.uuidString,
+                    "test:\(id.uuidString.lowercased())",
+                    RemotePushEventKind.test.rawValue,
+                    now.timeIntervalSince1970,
+                ]
+            )
+            return id
+        }
+    }
+
+    public func claimNextPushDelivery(
+        now: Date,
+        leaseDuration: TimeInterval
+    ) async throws -> RemotePushDeliveryClaim? {
+        try await dbQueue.write { db in
+            let staleApprovalArguments: StatementArguments = [
+                RemotePushEventKind.approvalCreated.rawValue,
+                ApprovalStatus.pending.rawValue,
+                now.timeIntervalSince1970,
+            ]
+            try db.execute(
+                sql: """
+                UPDATE remote_push_deliveries
+                SET status = 'failed', lease_until = NULL,
+                    last_error = 'approval is no longer pending'
+                WHERE status IN ('pending', 'retry', 'leased')
+                  AND event_id IN (
+                    SELECT e.id
+                    FROM remote_push_outbox e
+                    JOIN approvals a ON a.id = e.approval_id
+                    WHERE e.kind = ? AND (a.status <> ? OR a.expires_at <= ?)
+                  )
+                """,
+                arguments: staleApprovalArguments
+            )
+            try db.execute(
+                sql: """
+                UPDATE remote_push_outbox
+                SET materialized_at = COALESCE(materialized_at, ?),
+                    completed_at = COALESCE(completed_at, ?)
+                WHERE kind = ?
+                  AND id IN (
+                    SELECT e.id
+                    FROM remote_push_outbox e
+                    JOIN approvals a ON a.id = e.approval_id
+                    WHERE e.kind = ? AND (a.status <> ? OR a.expires_at <= ?)
+                  )
+                """,
+                arguments: [
+                    now.timeIntervalSince1970,
+                    now.timeIntervalSince1970,
+                    RemotePushEventKind.approvalCreated.rawValue,
+                    RemotePushEventKind.approvalCreated.rawValue,
+                    ApprovalStatus.pending.rawValue,
+                    now.timeIntervalSince1970,
+                ]
+            )
+            if let event = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT id FROM remote_push_outbox
+                WHERE materialized_at IS NULL AND completed_at IS NULL
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ) {
+                let eventID: String = event["id"]
+                let subscriptionRows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT id FROM remote_push_subscriptions WHERE active = 1"
+                )
+                for subscriptionRow in subscriptionRows {
+                    let subscriptionID: String = subscriptionRow["id"]
+                    try db.execute(
+                        sql: """
+                        INSERT OR IGNORE INTO remote_push_deliveries (
+                            id, event_id, subscription_id, status, attempt_count,
+                            next_attempt_at, created_at
+                        ) VALUES (?, ?, ?, 'pending', 0, ?, ?)
+                        """,
+                        arguments: [
+                            UUID().uuidString,
+                            eventID,
+                            subscriptionID,
+                            now.timeIntervalSince1970,
+                            now.timeIntervalSince1970,
+                        ]
+                    )
+                }
+                try db.execute(
+                    sql: """
+                    UPDATE remote_push_outbox
+                    SET materialized_at = ?, completed_at = CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1 FROM remote_push_deliveries WHERE event_id = ?
+                        ) THEN ? ELSE completed_at END
+                    WHERE id = ?
+                    """,
+                    arguments: [
+                        now.timeIntervalSince1970,
+                        eventID,
+                        now.timeIntervalSince1970,
+                        eventID,
+                    ]
+                )
+            }
+
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                SELECT
+                    d.id AS delivery_id,
+                    d.attempt_count,
+                    e.id AS event_id,
+                    e.kind,
+                    e.approval_id,
+                    s.*
+                FROM remote_push_deliveries d
+                JOIN remote_push_outbox e ON e.id = d.event_id
+                JOIN remote_push_subscriptions s ON s.id = d.subscription_id
+                WHERE s.active = 1
+                  AND e.completed_at IS NULL
+                  AND d.next_attempt_at <= ?
+                  AND (
+                    d.status IN ('pending', 'retry')
+                    OR (d.status = 'leased' AND d.lease_until <= ?)
+                  )
+                ORDER BY e.created_at ASC, d.created_at ASC
+                LIMIT 1
+                """,
+                arguments: [now.timeIntervalSince1970, now.timeIntervalSince1970]
+            ) else {
+                return nil
+            }
+
+            let deliveryIDString: String = row["delivery_id"]
+            let eventIDString: String = row["event_id"]
+            let eventKindString: String = row["kind"]
+            let approvalIDString: String? = row["approval_id"]
+            guard let deliveryID = UUID(uuidString: deliveryIDString),
+                  let eventID = UUID(uuidString: eventIDString),
+                  let eventKind = RemotePushEventKind(rawValue: eventKindString)
+            else {
+                throw ApprovalPersistenceError.corruptRecord
+            }
+            let attemptCount: Int = row["attempt_count"]
+            try db.execute(
+                sql: """
+                UPDATE remote_push_deliveries
+                SET status = 'leased', attempt_count = attempt_count + 1, lease_until = ?
+                WHERE id = ?
+                """,
+                arguments: [
+                    now.addingTimeInterval(leaseDuration).timeIntervalSince1970,
+                    deliveryIDString,
+                ]
+            )
+
+            let approvalID = approvalIDString.flatMap(UUID.init(uuidString:))
+            let destination: String
+            let title: String
+            let body: String
+            let tag: String
+            switch eventKind {
+            case .approvalCreated:
+                guard let approvalID else { throw ApprovalPersistenceError.corruptRecord }
+                destination = "/approvals?approval=\(approvalID.uuidString.lowercased())"
+                title = "Remote"
+                body = "A new approval is waiting."
+                tag = "remote-approval-\(approvalID.uuidString.lowercased())"
+            case .test:
+                destination = "/approvals"
+                title = "Remote"
+                body = "Notifications are working."
+                tag = "remote-test-\(eventID.uuidString.lowercased())"
+            }
+
+            return RemotePushDeliveryClaim(
+                deliveryID: deliveryID,
+                subscription: try Self.decodePushSubscription(row),
+                notification: RemotePushNotification(
+                    eventID: eventID,
+                    eventKind: eventKind,
+                    approvalID: approvalID,
+                    destination: destination,
+                    title: title,
+                    body: body,
+                    tag: tag
+                ),
+                attemptCount: attemptCount + 1
+            )
+        }
+    }
+
+    public func completePushDelivery(id: UUID, now: Date) async throws {
+        try await dbQueue.write { db in
+            guard let delivery = try Row.fetchOne(
+                db,
+                sql: "SELECT event_id, subscription_id FROM remote_push_deliveries WHERE id = ?",
+                arguments: [id.uuidString]
+            ) else { return }
+            let eventID: String = delivery["event_id"]
+            let subscriptionID: String = delivery["subscription_id"]
+            try db.execute(
+                sql: """
+                UPDATE remote_push_deliveries
+                SET status = 'delivered', lease_until = NULL, last_error = NULL, delivered_at = ?
+                WHERE id = ?
+                """,
+                arguments: [now.timeIntervalSince1970, id.uuidString]
+            )
+            try db.execute(
+                sql: """
+                UPDATE remote_push_subscriptions
+                SET last_success_at = ?, last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                arguments: [
+                    now.timeIntervalSince1970,
+                    now.timeIntervalSince1970,
+                    subscriptionID,
+                ]
+            )
+            try Self.completeOutboxIfTerminal(db: db, eventID: eventID, now: now)
+        }
+    }
+
+    public func retryPushDelivery(
+        id: UUID,
+        now: Date,
+        nextAttemptAt: Date,
+        error: String?
+    ) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                UPDATE remote_push_deliveries
+                SET status = 'retry', lease_until = NULL, next_attempt_at = ?, last_error = ?
+                WHERE id = ?
+                """,
+                arguments: [nextAttemptAt.timeIntervalSince1970, error, id.uuidString]
+            )
+        }
+    }
+
+    public func failPushDelivery(
+        id: UUID,
+        now: Date,
+        error: String?,
+        deactivateSubscription: Bool
+    ) async throws {
+        try await dbQueue.write { db in
+            guard let delivery = try Row.fetchOne(
+                db,
+                sql: "SELECT event_id, subscription_id FROM remote_push_deliveries WHERE id = ?",
+                arguments: [id.uuidString]
+            ) else { return }
+            let eventID: String = delivery["event_id"]
+            let subscriptionID: String = delivery["subscription_id"]
+            try db.execute(
+                sql: """
+                UPDATE remote_push_deliveries
+                SET status = 'failed', lease_until = NULL, last_error = ?
+                WHERE id = ?
+                """,
+                arguments: [error, id.uuidString]
+            )
+            try db.execute(
+                sql: """
+                UPDATE remote_push_subscriptions
+                SET active = CASE WHEN ? THEN 0 ELSE active END,
+                    last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                arguments: [
+                    deactivateSubscription,
+                    error,
+                    now.timeIntervalSince1970,
+                    subscriptionID,
+                ]
+            )
+            try Self.completeOutboxIfTerminal(db: db, eventID: eventID, now: now)
+        }
+    }
+
+    private static func completeOutboxIfTerminal(
+        db: Database,
+        eventID: String,
+        now: Date
+    ) throws {
+        try db.execute(
+            sql: """
+            UPDATE remote_push_outbox
+            SET completed_at = ?
+            WHERE id = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM remote_push_deliveries
+                WHERE event_id = ? AND status IN ('pending', 'retry', 'leased')
+              )
+            """,
+            arguments: [now.timeIntervalSince1970, eventID, eventID]
+        )
+    }
+
+    private static func decodePushSubscription(_ row: Row) throws -> RemotePushSubscription {
+        let idString: String = row["id"]
+        guard let id = UUID(uuidString: idString) else {
+            throw ApprovalPersistenceError.corruptRecord
+        }
+        let createdAt: Double = row["created_at"]
+        let updatedAt: Double = row["updated_at"]
+        let active: Bool = row["active"]
+        return RemotePushSubscription(
+            id: id,
+            endpoint: row["endpoint"],
+            p256dh: row["p256dh"],
+            auth: row["auth"],
+            applicationServerKey: row["application_server_key"],
+            vapidKeyFingerprint: row["vapid_key_fingerprint"],
+            deviceLabel: row["device_label"],
+            createdAt: Date(timeIntervalSince1970: createdAt),
+            updatedAt: Date(timeIntervalSince1970: updatedAt),
+            active: active
+        )
+    }
+
+    private static func vapidKeyFingerprint(_ publicKey: String) -> String {
+        SHA256.hash(data: Data(publicKey.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
     private static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createApprovals") { db in
@@ -342,6 +805,47 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 table.column("created_at", .double).notNull().indexed()
                 table.column("started_at", .double)
                 table.column("completed_at", .double)
+            }
+        }
+        migrator.registerMigration("createRemotePushOutbox") { db in
+            try db.create(table: "remote_push_subscriptions", ifNotExists: true) { table in
+                table.column("id", .text).primaryKey()
+                table.column("endpoint", .text).notNull().unique()
+                table.column("p256dh", .text).notNull()
+                table.column("auth", .text).notNull()
+                table.column("application_server_key", .text)
+                table.column("vapid_key_fingerprint", .text)
+                table.column("device_label", .text)
+                table.column("active", .boolean).notNull().defaults(to: true).indexed()
+                table.column("created_at", .double).notNull().indexed()
+                table.column("updated_at", .double).notNull()
+                table.column("last_success_at", .double)
+                table.column("last_error", .text)
+            }
+            try db.create(table: "remote_push_outbox", ifNotExists: true) { table in
+                table.column("id", .text).primaryKey()
+                table.column("event_key", .text).notNull().unique()
+                table.column("kind", .text).notNull()
+                table.column("approval_id", .text)
+                    .references("approvals", column: "id", onDelete: .cascade)
+                table.column("created_at", .double).notNull().indexed()
+                table.column("materialized_at", .double)
+                table.column("completed_at", .double)
+            }
+            try db.create(table: "remote_push_deliveries", ifNotExists: true) { table in
+                table.column("id", .text).primaryKey()
+                table.column("event_id", .text).notNull()
+                    .references("remote_push_outbox", column: "id", onDelete: .cascade)
+                table.column("subscription_id", .text).notNull()
+                    .references("remote_push_subscriptions", column: "id", onDelete: .cascade)
+                table.column("status", .text).notNull().indexed()
+                table.column("attempt_count", .integer).notNull().defaults(to: 0)
+                table.column("next_attempt_at", .double).notNull().indexed()
+                table.column("lease_until", .double).indexed()
+                table.column("last_error", .text)
+                table.column("delivered_at", .double)
+                table.column("created_at", .double).notNull()
+                table.uniqueKey(["event_id", "subscription_id"])
             }
         }
         return migrator

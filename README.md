@@ -1,10 +1,10 @@
 # MCPServer
 
-Local Swift MCP servers used by WorkHarness and related agent tooling. Each server is an independent executable target. `RemoteMCPServer` supports an HTTP interface for the iPhone and a local stdio MCP transport for Claude Code.
+Local Swift MCP servers used by WorkHarness and related agent tooling. Each server is an independent executable target. Remote uses `RemoteMCPServer` for local stdio MCP and the separate `RemoteHTTPServer` for its private iPhone web interface.
 
-## RemoteMCPServer
+## Remote
 
-`RemoteMCPServer` lets an MCP client pause on `ask_user`, display the decision in a mobile browser, and return the exact option selected by the user. Its `/claude` page also queues full Claude Code tasks on the Mac and returns their responses to the browser.
+`RemoteMCPServer` lets an MCP client pause on `ask_user`, display the decision in a mobile browser, and return the exact option selected by the user. `RemoteHTTPServer` owns HTTP, the PWA, Web Push, and the `/claude` page that queues full Claude Code tasks on the Mac. Both processes share the same SQLite database.
 
 ### Installed setup
 
@@ -13,11 +13,14 @@ The production service is installed in:
 ```text
 ~/Library/Application Support/Remote/
 ├── approval.sqlite
+├── vapid.json
 ├── token
-└── bin/RemoteMCPServer
+└── bin/
+    ├── RemoteHTTPServer
+    └── RemoteMCPServer
 ```
 
-It is started at macOS login by `~/Library/LaunchAgents/com.lammax.remote.plist`, listens only on the Mac's exact Tailscale address `100.123.251.91:3010`, and logs to `~/Library/Logs/Remote/`.
+`RemoteHTTPServer` is started at macOS login by `~/Library/LaunchAgents/com.lammax.remote.plist`, listens only on `127.0.0.1:3010`, and logs to `~/Library/Logs/Remote/`. Tailscale Serve exposes it to the tailnet at `https://macbook-pro.tailab24a8.ts.net`; Funnel is not enabled. `RemoteMCPServer` is launched separately over stdio by Claude Code or Codex.
 
 The token is stored with user-only permissions and is never printed. `/remote-start` copies it to the Mac clipboard so it can be pasted into Safari on the iPhone through Universal Clipboard.
 
@@ -33,6 +36,7 @@ The model-invoked `remote-mode` skill accepts two short handoffs: `Я ушёл` 
 ### Build and test
 
 ```bash
+swift build -c release --product RemoteHTTPServer
 swift build -c release --product RemoteMCPServer
 swift test --filter RemoteTests
 ```
@@ -41,10 +45,12 @@ swift test --filter RemoteTests
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REMOTE_HOST` | `127.0.0.1` | Loopback or exact Tailscale address. Wildcard and ordinary LAN addresses are rejected. |
+| `REMOTE_HOST` | `127.0.0.1` | Loopback or exact Tailscale address. Production uses loopback behind Serve. Wildcard and ordinary LAN addresses are rejected. |
 | `REMOTE_PORT` | `3010` | HTTP port. |
+| `REMOTE_PUBLIC_ORIGIN` | derived from host and port | External origin used for Secure cookies and Origin validation. |
 | `REMOTE_TOKEN` | none | Inline access token of at least 32 characters. |
 | `REMOTE_TOKEN_FILE` | none | Preferred path to a file containing the access token. |
+| `REMOTE_VAPID_FILE` | `~/Library/Application Support/Remote/vapid.json` | Stable VAPID configuration with mode `600`. Never regenerate it during startup or upgrades. |
 | `REMOTE_DB_PATH` | `~/Library/Application Support/Remote/approval.sqlite` | SQLite database path. |
 | `REMOTE_TIMEOUT_SECONDS` | `300` | Maximum wait for a decision, from 1 to 3,600 seconds. |
 | `REMOTE_CLAUDE_PATH` | `~/.local/bin/claude` | Claude Code executable used by the remote task worker. |
@@ -56,7 +62,7 @@ For a development run, generate a token without committing or printing it:
 token_file="$(mktemp)"
 openssl rand -hex -out "$token_file" 32
 chmod 600 "$token_file"
-REMOTE_TOKEN_FILE="$token_file" swift run RemoteMCPServer
+REMOTE_TOKEN_FILE="$token_file" swift run RemoteHTTPServer
 ```
 
 Do not place the token in this repository, command history, URLs, logs, or screenshots.
@@ -99,15 +105,19 @@ codex mcp add remote -- \
 
 ### iPhone over Tailscale
 
-Open this page on the iPhone while Tailscale is connected:
+Open these HTTPS pages on the iPhone while Tailscale is connected:
 
 ```text
-http://100.123.251.91:3010/approvals
-http://100.123.251.91:3010/claude
+https://macbook-pro.tailab24a8.ts.net/approvals
+https://macbook-pro.tailab24a8.ts.net/claude
 ```
+
+For Web Push on iPhone, add the approvals page to the Home Screen, launch that installed PWA, and press **Enable notifications**. The service worker does not cache authenticated pages or approval data. Notifications contain only a generic message and an approval ID deep link; the question and options are fetched after authentication.
 
 The Claude page stores requests in SQLite and runs them one at a time. Jobs survive a web-service restart, and the page polls their queued, running, completed, or failed state without disturbing the request field. Claude is intentionally started with `bypassPermissions`, so a request submitted through this page has the same broad ability to read and change files, run commands, access the network, and call configured MCP tools as a fully trusted local Claude Code task. Keep the page private to the authenticated Tailscale connection.
 
-Run `/remote-start` in Claude Code for the initial login, then paste the token from Universal Clipboard. The login form uses the fixed username `remote`, so Chrome or Safari can save the token as a password and autofill it later. The browser receives a 90-day HttpOnly authentication cookie derived with HMAC from the token. It remains valid across `/remote-stop`, `/remote-start`, server upgrades, and Mac restarts; rotating the token invalidates it immediately. Saving the credential in the browser's synced password manager is the fallback if browser data is cleared while away from the Mac.
+Run `/remote-start` in Claude Code for the initial login, then paste the token from Universal Clipboard. The login form uses the fixed username `remote`, so Chrome or Safari can save the token as a password and autofill it later. The browser receives a 90-day Secure, HttpOnly, SameSite=Strict authentication cookie derived with HMAC from the token. State-changing cookie requests also require a CSRF token and matching HTTPS origin. The cookie remains valid across `/remote-stop`, `/remote-start`, server upgrades, and Mac restarts; rotating the token invalidates it immediately. Saving the credential in the browser's synced password manager is the fallback if browser data is cleared while away from the Mac.
 
-Do not use `0.0.0.0`, public port forwarding, an exit node, or DNS/routing changes. Tailscale and ZeroTier settings do not need to be modified.
+Push subscriptions and the transactional outbox are persisted in the same SQLite database, so they survive service and Mac restarts. Delivery retries use leases and stable notification tags; an invalid provider subscription is deactivated without affecting the approval itself. Keep `vapid.json` stable—rotating it requires enabling notifications again on each device.
+
+Do not use `0.0.0.0`, public port forwarding, or Tailscale Funnel. The Mac intentionally does not consume Tailscale DNS settings because of its existing network coexistence setup; `remote-control` therefore checks local health over loopback. Do not change Tailscale DNS, ZeroTier, corporate routes, or exit-node settings as part of Remote troubleshooting.

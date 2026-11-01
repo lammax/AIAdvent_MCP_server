@@ -1,8 +1,6 @@
 import Foundation
-import Vapor
 import MCP
 import Shared
-internal import NIOFoundationCompat
 
 private struct ApprovalToolOutput: Codable, Sendable {
     let requestId: UUID
@@ -81,11 +79,6 @@ private func parseOptions(_ value: MCP.Value?) throws -> [String] {
         throw ToolInputError.invalid("Every option must be a string.")
     }
     return options
-}
-
-private func httpAuthority(host: String, port: Int) -> String {
-    let formattedHost = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
-    return "\(formattedHost):\(port)"
 }
 
 private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
@@ -235,70 +228,6 @@ private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
 @main
 enum RemoteMCPServer {
     static func main() async throws {
-        if CommandLine.arguments.dropFirst().contains("--stdio") {
-            try await runStdioServer()
-            return
-        }
-
-        let configuration = try RemoteConfiguration.load()
-
-        var environment = try Environment.detect()
-        try LoggingSystem.bootstrap(from: &environment)
-        let app = try await Application.make(environment)
-        defer {
-            Task { try? await app.asyncShutdown() }
-        }
-
-        app.http.server.configuration.hostname = configuration.host
-        app.http.server.configuration.port = configuration.port
-
-        let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
-        let service = ApprovalService(repository: repository, timeout: configuration.timeout)
-        let claudeService = RemoteClaudeJobService(
-            repository: repository,
-            runner: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
-            workingDirectory: configuration.claudeWorkingDirectory
-        )
-        try await claudeService.start()
-        let authorization = ApprovalHTTPAuthorization(token: configuration.token)
-        configureApprovalHTTPRoutes(
-            app: app,
-            service: service,
-            authorization: authorization,
-            claudeService: claudeService
-        )
-
-        let mcpServer = await makeRemoteMCPServer(service: service)
-        let authority = httpAuthority(host: configuration.host, port: configuration.port)
-        let transport = StatelessHTTPServerTransport(
-            validationPipeline: StandardValidationPipeline(validators: [
-                OriginValidator(
-                    allowedHosts: [authority],
-                    allowedOrigins: ["http://\(authority)"]
-                ),
-                AcceptHeaderValidator(mode: .jsonOnly),
-                ContentTypeValidator(),
-                ProtocolVersionValidator(),
-            ])
-        )
-        try await mcpServer.start(transport: transport)
-
-        app.on(.POST, "mcp") { request async throws -> Vapor.Response in
-            guard authorization.isBearerAuthorized(request) else {
-                throw Abort(.unauthorized, reason: "Bearer authorization is required.")
-            }
-            let httpRequest = HTTPRequest(
-                method: "POST",
-                headers: mcpHeaders(from: request.headers),
-                body: Data(buffer: request.body.data ?? ByteBuffer())
-            )
-            return vaporResponse(from: await transport.handleRequest(httpRequest))
-        }
-
-        try await app.execute()
-    }
-
-    private static func runStdioServer() async throws {
         let configuration = try RemoteServiceConfiguration.load()
         let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
         let service = ApprovalService(repository: repository, timeout: configuration.timeout)

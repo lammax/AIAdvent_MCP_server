@@ -8,14 +8,24 @@ public struct ApprovalHTTPAuthorization: Sendable {
 
     private let token: String
     private let sessionToken: String
+    private let csrfToken: String
+    private let secureCookies: Bool
+    private let publicOrigin: String?
 
-    public init(token: String) {
+    public init(token: String, secureCookies: Bool = false, publicOrigin: URL? = nil) {
         self.token = token
+        self.secureCookies = secureCookies
+        self.publicOrigin = publicOrigin.map(Self.normalizedOrigin)
         let authenticationCode = HMAC<SHA256>.authenticationCode(
             for: Data("remote-auth-v1".utf8),
             using: SymmetricKey(data: Data(token.utf8))
         )
         self.sessionToken = authenticationCode.map { String(format: "%02x", $0) }.joined()
+        let csrfCode = HMAC<SHA256>.authenticationCode(
+            for: Data("remote-csrf-v1".utf8),
+            using: SymmetricKey(data: Data(token.utf8))
+        )
+        self.csrfToken = csrfCode.map { String(format: "%02x", $0) }.joined()
     }
 
     public func validate(token candidate: String) -> Bool {
@@ -35,6 +45,28 @@ public struct ApprovalHTTPAuthorization: Sendable {
         return validate(token: bearer.token)
     }
 
+    public var csrfTokenValue: String { csrfToken }
+
+    public func validateCSRF(token candidate: String) -> Bool {
+        constantTimeEquals(csrfToken, candidate)
+    }
+
+    public func isCSRFAuthorized(_ request: Request) -> Bool {
+        guard isAuthorized(request) else { return false }
+        if isBearerAuthorized(request) { return true }
+        guard let candidate = request.headers.first(name: "X-CSRF-Token"),
+              constantTimeEquals(csrfToken, candidate)
+        else {
+            return false
+        }
+        guard let publicOrigin,
+              let requestOrigin = request.headers.first(name: .origin)
+        else {
+            return true
+        }
+        return Self.normalizedOriginString(requestOrigin) == publicOrigin
+    }
+
     public func authorizedCookie() -> HTTPCookies.Value {
         HTTPCookies.Value(
             string: sessionToken,
@@ -42,7 +74,7 @@ public struct ApprovalHTTPAuthorization: Sendable {
             maxAge: Self.sessionLifetime,
             domain: nil,
             path: "/",
-            isSecure: false,
+            isSecure: secureCookies,
             isHTTPOnly: true,
             sameSite: .strict
         )
@@ -55,7 +87,7 @@ public struct ApprovalHTTPAuthorization: Sendable {
             maxAge: 0,
             domain: nil,
             path: "/",
-            isSecure: false,
+            isSecure: secureCookies,
             isHTTPOnly: true,
             sameSite: .strict
         )
@@ -73,13 +105,39 @@ public struct ApprovalHTTPAuthorization: Sendable {
         }
         return difference == 0
     }
+
+
+    private static func normalizedOrigin(_ url: URL) -> String {
+        normalizedOriginString(url.absoluteString) ?? url.absoluteString
+    }
+
+    private static func normalizedOriginString(_ value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased()
+        else { return nil }
+        let defaultPort = scheme == "https" ? 443 : 80
+        let port = components.port ?? defaultPort
+        return "\(scheme)://\(host):\(port)"
+    }
+}
+
+public struct RemotePushHTTPContext: Sendable {
+    public let repository: any RemotePushRepository
+    public let publicKey: String
+
+    public init(repository: any RemotePushRepository, publicKey: String) {
+        self.repository = repository
+        self.publicKey = publicKey
+    }
 }
 
 public func configureApprovalHTTPRoutes(
     app: Application,
     service: ApprovalService,
     authorization: ApprovalHTTPAuthorization,
-    claudeService: RemoteClaudeJobService? = nil
+    claudeService: RemoteClaudeJobService? = nil,
+    push: RemotePushHTTPContext? = nil
 ) {
     app.get { request in
         request.redirect(to: "/approvals")
@@ -87,6 +145,59 @@ public func configureApprovalHTTPRoutes(
 
     app.get("health") { _ in
         ApprovalHealthResponse(status: "ok")
+    }
+
+    app.get("manifest.webmanifest") { _ throws -> Response in
+        try bundledResourceResponse(
+            name: "manifest",
+            extension: "webmanifest",
+            contentType: "application/manifest+json"
+        )
+    }
+
+    app.get("service-worker.js") { _ throws -> Response in
+        try bundledResourceResponse(
+            name: "service-worker",
+            extension: "js",
+            contentType: "text/javascript; charset=utf-8",
+            cacheControl: "no-cache"
+        )
+    }
+
+    app.get("assets", "remote-icon.svg") { _ throws -> Response in
+        try bundledResourceResponse(
+            name: "remote-icon",
+            extension: "svg",
+            contentType: "image/svg+xml",
+            cacheControl: "public, max-age=86400"
+        )
+    }
+
+    app.get("assets", "remote-icon-192.png") { _ throws -> Response in
+        try bundledResourceResponse(
+            name: "remote-icon-192",
+            extension: "png",
+            contentType: "image/png",
+            cacheControl: "public, max-age=86400"
+        )
+    }
+
+    app.get("assets", "remote-icon-512.png") { _ throws -> Response in
+        try bundledResourceResponse(
+            name: "remote-icon-512",
+            extension: "png",
+            contentType: "image/png",
+            cacheControl: "public, max-age=86400"
+        )
+    }
+
+    app.get("assets", "apple-touch-icon.png") { _ throws -> Response in
+        try bundledResourceResponse(
+            name: "apple-touch-icon",
+            extension: "png",
+            contentType: "image/png",
+            cacheControl: "public, max-age=86400"
+        )
     }
 
     app.get("login") { request -> Response in
@@ -107,6 +218,12 @@ public func configureApprovalHTTPRoutes(
     }
 
     app.post("logout") { request -> Response in
+        let csrfToken = (try? request.content.get(String.self, at: "csrf")) ?? ""
+        guard authorization.isAuthorized(request),
+              authorization.validateCSRF(token: csrfToken)
+        else {
+            return Response(status: .forbidden)
+        }
         let response = request.redirect(to: "/login")
         response.cookies[ApprovalHTTPAuthorization.cookieName] = authorization.expiredCookie()
         return response
@@ -116,7 +233,7 @@ public func configureApprovalHTTPRoutes(
         guard authorization.isAuthorized(request) else {
             return request.redirect(to: "/login")
         }
-        return htmlResponse(ApprovalWebPage.approvals())
+        return htmlResponse(ApprovalWebPage.approvals(csrfToken: authorization.csrfTokenValue))
     }
 
     app.get("approvals", "pending") { request async throws -> ApprovalListResponse in
@@ -135,7 +252,7 @@ public func configureApprovalHTTPRoutes(
     }
 
     app.post("approvals", ":approvalID", "respond") { request async throws -> ApprovalResponse in
-        try requireAuthorization(request, authorization: authorization)
+        try requireMutationAuthorization(request, authorization: authorization)
         let id = try approvalID(from: request)
         let body = try request.content.decode(ApprovalSubmitResponse.self)
         do {
@@ -159,7 +276,7 @@ public func configureApprovalHTTPRoutes(
         guard claudeService != nil else {
             return Response(status: .notFound)
         }
-        return htmlResponse(ApprovalWebPage.claude())
+        return htmlResponse(ApprovalWebPage.claude(csrfToken: authorization.csrfTokenValue))
     }
 
     app.get("claude", "jobs") { request async throws -> RemoteClaudeJobListResponse in
@@ -183,7 +300,7 @@ public func configureApprovalHTTPRoutes(
     }
 
     app.post("claude", "jobs") { request async throws -> RemoteClaudeJobResponse in
-        try requireAuthorization(request, authorization: authorization)
+        try requireMutationAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
         let body = try request.content.decode(RemoteClaudeSubmitRequest.self)
         do {
@@ -191,6 +308,59 @@ public func configureApprovalHTTPRoutes(
         } catch let error as RemoteClaudeJobError {
             throw Abort(.badRequest, reason: error.localizedDescription)
         }
+    }
+
+
+    app.get("api", "push", "vapid-public-key") { _ throws -> RemotePushPublicKeyResponse in
+        guard let push else { throw Abort(.serviceUnavailable, reason: "Push is not configured.") }
+        return RemotePushPublicKeyResponse(publicKey: push.publicKey)
+    }
+
+    app.get("api", "push", "status") { request async throws -> RemotePushStatusResponse in
+        try requireAuthorization(request, authorization: authorization)
+        guard let push else {
+            return RemotePushStatusResponse(configured: false, activeSubscriptions: 0)
+        }
+        return RemotePushStatusResponse(
+            configured: true,
+            activeSubscriptions: try await push.repository.activePushSubscriptions().count
+        )
+    }
+
+    app.post("api", "push", "subscribe") { request async throws -> RemotePushStatusResponse in
+        try requireMutationAuthorization(request, authorization: authorization)
+        guard let push else { throw Abort(.serviceUnavailable, reason: "Push is not configured.") }
+        let body = try request.content.decode(RemotePushSubscriptionRequest.self)
+        try validatePushSubscription(body, expectedPublicKey: push.publicKey)
+        _ = try await push.repository.upsertPushSubscription(
+            endpoint: body.endpoint,
+            p256dh: body.keys.p256dh,
+            auth: body.keys.auth,
+            applicationServerKey: body.applicationServerKey,
+            deviceLabel: body.deviceLabel,
+            now: Date()
+        )
+        return RemotePushStatusResponse(
+            configured: true,
+            activeSubscriptions: try await push.repository.activePushSubscriptions().count
+        )
+    }
+
+    app.delete("api", "push", "subscribe") { request async throws -> RemotePushStatusResponse in
+        try requireMutationAuthorization(request, authorization: authorization)
+        guard let push else { throw Abort(.serviceUnavailable, reason: "Push is not configured.") }
+        let body = try request.content.decode(RemotePushUnsubscribeRequest.self)
+        try await push.repository.deactivatePushSubscription(endpoint: body.endpoint, now: Date())
+        return RemotePushStatusResponse(
+            configured: true,
+            activeSubscriptions: try await push.repository.activePushSubscriptions().count
+        )
+    }
+
+    app.post("api", "push", "test") { request async throws -> RemotePushTestResponse in
+        try requireMutationAuthorization(request, authorization: authorization)
+        guard let push else { throw Abort(.serviceUnavailable, reason: "Push is not configured.") }
+        return RemotePushTestResponse(eventID: try await push.repository.enqueueTestPush(now: Date()))
     }
 }
 
@@ -200,6 +370,15 @@ private func requireAuthorization(
 ) throws {
     guard authorization.isAuthorized(request) else {
         throw Abort(.unauthorized, reason: "Authorization is required.")
+    }
+}
+
+private func requireMutationAuthorization(
+    _ request: Request,
+    authorization: ApprovalHTTPAuthorization
+) throws {
+    guard authorization.isCSRFAuthorized(request) else {
+        throw Abort(.forbidden, reason: "A valid CSRF token is required.")
     }
 }
 
@@ -237,9 +416,82 @@ private func htmlResponse(_ html: String, status: HTTPResponseStatus = .ok) -> R
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
+            "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
         ],
         body: .init(string: html)
     )
+}
+
+private func bundledResourceResponse(
+    name: String,
+    extension fileExtension: String,
+    contentType: String,
+    cacheControl: String = "public, max-age=3600"
+) throws -> Response {
+    guard let url = Bundle.module.url(forResource: name, withExtension: fileExtension) else {
+        throw Abort(.notFound)
+    }
+    return Response(
+        status: .ok,
+        headers: [
+            "Content-Type": contentType,
+            "Cache-Control": cacheControl,
+        ],
+        body: .init(data: try Data(contentsOf: url))
+    )
+}
+
+private func validatePushSubscription(
+    _ subscription: RemotePushSubscriptionRequest,
+    expectedPublicKey: String
+) throws {
+    guard let endpoint = URL(string: subscription.endpoint),
+          endpoint.scheme?.lowercased() == "https",
+          endpoint.host != nil,
+          subscription.endpoint.count <= 4_096,
+          (16...512).contains(subscription.keys.p256dh.count),
+          (8...256).contains(subscription.keys.auth.count),
+          let applicationServerKey = subscription.applicationServerKey,
+          (16...512).contains(applicationServerKey.count),
+          (subscription.deviceLabel?.count ?? 0) <= 100
+    else {
+        throw Abort(.badRequest, reason: "Invalid push subscription.")
+    }
+    guard applicationServerKey == expectedPublicKey else {
+        throw Abort(.conflict, reason: "The push subscription uses an outdated VAPID key.")
+    }
+}
+
+public struct RemotePushPublicKeyResponse: Content, Sendable {
+    public let publicKey: String
+}
+
+public struct RemotePushStatusResponse: Content, Sendable {
+    public let configured: Bool
+    public let activeSubscriptions: Int
+}
+
+public struct RemotePushTestResponse: Content, Sendable {
+    public let eventID: UUID
+}
+
+private struct RemotePushSubscriptionRequest: Content, Sendable {
+    struct Keys: Content, Sendable {
+        let p256dh: String
+        let auth: String
+    }
+
+    let endpoint: String
+    let keys: Keys
+    let applicationServerKey: String?
+    let deviceLabel: String?
+}
+
+private struct RemotePushUnsubscribeRequest: Content, Sendable {
+    let endpoint: String
 }
 
 private struct ApprovalLoginRequest: Content {
@@ -354,6 +606,10 @@ private enum ApprovalWebPage {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <meta name="theme-color" content="#0f172a">
+          <link rel="manifest" href="/manifest.webmanifest">
+          <link rel="icon" href="/assets/remote-icon.svg" type="image/svg+xml">
+          <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
           <title>Remote Login</title>
           <style>\(sharedStyles)</style>
         </head>
@@ -376,13 +632,19 @@ private enum ApprovalWebPage {
         """
     }
 
-    static func approvals() -> String {
+    static func approvals(csrfToken: String) -> String {
         """
         <!doctype html>
         <html lang="en">
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <meta name="theme-color" content="#0f172a">
+          <meta name="apple-mobile-web-app-capable" content="yes">
+          <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+          <link rel="manifest" href="/manifest.webmanifest">
+          <link rel="icon" href="/assets/remote-icon.svg" type="image/svg+xml">
+          <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
           <title>Pending Approvals</title>
           <style>\(sharedStyles)</style>
         </head>
@@ -390,12 +652,23 @@ private enum ApprovalWebPage {
           <main class="shell">
             <header>
               <div><p class="eyebrow">Remote</p><h1>Pending approvals</h1></div>
-              <nav><a class="secondary action-link" href="/claude">Claude</a><form method="post" action="/logout"><button class="secondary" type="submit">Sign out</button></form></nav>
+              <nav><a class="secondary action-link" href="/claude">Claude</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="\(csrfToken)"><button class="secondary" type="submit">Sign out</button></form></nav>
             </header>
+            <section class="card notification-card" aria-labelledby="notification-title">
+              <h2 id="notification-title">Notifications</h2>
+              <p id="notification-status" class="muted">Checking notification support…</p>
+              <div class="button-row">
+                <button id="enable-notifications" type="button">Enable notifications</button>
+                <button id="test-notification" class="secondary" type="button">Send test</button>
+                <button id="disable-notifications" class="secondary" type="button">Disable</button>
+              </div>
+            </section>
             <section id="state" class="card"><p class="muted">Loading…</p></section>
           </main>
           <script>
           const state = document.getElementById('state');
+          const csrfToken = '\(csrfToken)';
+          const requestedApprovalID = new URLSearchParams(window.location.search).get('approval')?.toLowerCase();
           let submitting = false;
           let renderedSignature = null;
           let formDirty = false;
@@ -434,8 +707,15 @@ private enum ApprovalWebPage {
               state.append(node('p', 'muted', 'This page refreshes automatically.'));
               return;
             }
+            approvals.sort((left, right) => {
+              if (!requestedApprovalID) return 0;
+              if (left.id.toLowerCase() === requestedApprovalID) return -1;
+              if (right.id.toLowerCase() === requestedApprovalID) return 1;
+              return 0;
+            });
             approvals.forEach((approval) => {
               const article = node('article', 'approval');
+              if (approval.id.toLowerCase() === requestedApprovalID) article.classList.add('targeted');
               const form = node('form', 'options');
               approval.questions.forEach((question) => {
                 const fieldset = node('fieldset', 'question-block');
@@ -495,7 +775,7 @@ private enum ApprovalWebPage {
             try {
               const result = await fetch(`/approvals/${approval.id}/respond`, {
                 method: 'POST', credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
                 body: JSON.stringify({ answers })
               });
               if (!result.ok) throw new Error('Submit failed');
@@ -508,20 +788,134 @@ private enum ApprovalWebPage {
             } finally { submitting = false; }
           }
 
+          const notificationStatus = document.getElementById('notification-status');
+          const enableNotifications = document.getElementById('enable-notifications');
+          const testNotification = document.getElementById('test-notification');
+          const disableNotifications = document.getElementById('disable-notifications');
+          let serviceWorkerRegistration = null;
+
+          function base64URLFromBuffer(buffer) {
+            const bytes = new Uint8Array(buffer || []);
+            let binary = '';
+            bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+            return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+          }
+
+          function bufferFromBase64URL(value) {
+            const padding = '='.repeat((4 - value.length % 4) % 4);
+            const binary = atob((value + padding).replaceAll('-', '+').replaceAll('_', '/'));
+            return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+          }
+
+          async function registerSubscription(subscription) {
+            const json = subscription.toJSON();
+            const applicationServerKey = base64URLFromBuffer(subscription.options.applicationServerKey);
+            const response = await fetch('/api/push/subscribe', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+              body: JSON.stringify({
+                ...json,
+                applicationServerKey,
+                deviceLabel: navigator.platform || 'PWA'
+              })
+            });
+            if (response.status === 409) return false;
+            if (!response.ok) throw new Error('Subscription registration failed');
+            return true;
+          }
+
+          async function refreshNotificationStatus() {
+            if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+              notificationStatus.textContent = 'Web Push is not supported in this browser.';
+              enableNotifications.disabled = true;
+              testNotification.disabled = true;
+              disableNotifications.disabled = true;
+              return;
+            }
+            serviceWorkerRegistration = await navigator.serviceWorker.register('/service-worker.js');
+            const subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+            if (subscription) {
+              const synchronized = await registerSubscription(subscription);
+              notificationStatus.textContent = synchronized
+                ? 'Notifications are enabled on this device.'
+                : 'Notifications need to be enabled again after a key change.';
+            } else if (Notification.permission === 'denied') {
+              notificationStatus.textContent = 'Notifications are blocked in system settings.';
+            } else {
+              notificationStatus.textContent = 'Notifications are not enabled on this device.';
+            }
+            testNotification.disabled = !subscription;
+            disableNotifications.disabled = !subscription;
+          }
+
+          enableNotifications.addEventListener('click', async () => {
+            try {
+              if (!serviceWorkerRegistration) await refreshNotificationStatus();
+              const keyResponse = await fetch('/api/push/vapid-public-key', { credentials: 'same-origin' });
+              if (!keyResponse.ok) throw new Error('Push is not configured');
+              const { publicKey } = await keyResponse.json();
+              let subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+              if (subscription && !(await registerSubscription(subscription))) {
+                await subscription.unsubscribe();
+                subscription = null;
+              }
+              if (!subscription) {
+                subscription = await serviceWorkerRegistration.pushManager.subscribe({
+                  userVisibleOnly: true,
+                  applicationServerKey: bufferFromBase64URL(publicKey)
+                });
+              }
+              if (!(await registerSubscription(subscription))) {
+                throw new Error('Push key mismatch');
+              }
+              await refreshNotificationStatus();
+            } catch (_) {
+              notificationStatus.textContent = 'Notifications could not be enabled.';
+            }
+          });
+
+          testNotification.addEventListener('click', async () => {
+            const response = await fetch('/api/push/test', {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'X-CSRF-Token': csrfToken }
+            });
+            notificationStatus.textContent = response.ok
+              ? 'Test notification queued.' : 'Test notification could not be queued.';
+          });
+
+          disableNotifications.addEventListener('click', async () => {
+            const subscription = await serviceWorkerRegistration?.pushManager.getSubscription();
+            if (!subscription) return refreshNotificationStatus();
+            await fetch('/api/push/subscribe', {
+              method: 'DELETE', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+              body: JSON.stringify({ endpoint: subscription.endpoint })
+            });
+            await subscription.unsubscribe();
+            await refreshNotificationStatus();
+          });
+
           loadApprovals(); setInterval(loadApprovals, 3000);
+          refreshNotificationStatus().catch(() => {
+            notificationStatus.textContent = 'Notification status is unavailable.';
+          });
           </script>
         </body>
         </html>
         """
     }
 
-    static func claude() -> String {
+    static func claude(csrfToken: String) -> String {
         """
         <!doctype html>
         <html lang="en">
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <meta name="theme-color" content="#0f172a">
+          <link rel="manifest" href="/manifest.webmanifest">
+          <link rel="icon" href="/assets/remote-icon.svg" type="image/svg+xml">
+          <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
           <title>Remote Claude</title>
           <style>\(sharedStyles)</style>
         </head>
@@ -529,7 +923,7 @@ private enum ApprovalWebPage {
           <main class="shell">
             <header>
               <div><p class="eyebrow">Remote</p><h1>Claude</h1></div>
-              <nav><a class="secondary action-link" href="/approvals">Approvals</a><form method="post" action="/logout"><button class="secondary" type="submit">Sign out</button></form></nav>
+              <nav><a class="secondary action-link" href="/approvals">Approvals</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="\(csrfToken)"><button class="secondary" type="submit">Sign out</button></form></nav>
             </header>
             <section class="card composer">
               <form id="prompt-form">
@@ -543,6 +937,7 @@ private enum ApprovalWebPage {
           </main>
           <script>
           const form = document.getElementById('prompt-form');
+          const csrfToken = '\(csrfToken)';
           const promptInput = document.getElementById('prompt');
           const sendButton = document.getElementById('send');
           const composerMessage = document.getElementById('composer-message');
@@ -621,7 +1016,7 @@ private enum ApprovalWebPage {
             try {
               const response = await fetch('/claude/jobs', {
                 method: 'POST', credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
                 body: JSON.stringify({ prompt })
               });
               if (response.status === 401) { window.location = '/login'; return; }
@@ -656,6 +1051,7 @@ private enum ApprovalWebPage {
     nav { display: flex; align-items: center; gap: 8px; }
     nav form { margin: 0; }
     h1 { margin: 2px 0 0; font-size: clamp(1.7rem, 7vw, 2.4rem); line-height: 1.1; }
+    h2 { margin: 0 0 8px; font-size: 1.15rem; }
     .eyebrow { margin: 0; color: #2563eb; font-size: .78rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
     .card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
     .login-card { margin-top: 10vh; }
@@ -668,6 +1064,11 @@ private enum ApprovalWebPage {
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
     .action-link { display: inline-flex; align-items: center; min-height: 42px; border-radius: 13px; padding: 10px 14px; background: #e2e8f0; color: #1e293b; font-weight: 750; text-decoration: none; }
     .approval + .approval { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
+    .approval.targeted { border-radius: 14px; outline: 3px solid #60a5fa; outline-offset: 8px; }
+    .notification-card { margin-bottom: 18px; }
+    .notification-card .muted { margin: 0; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .button-row button { width: auto; min-height: 42px; margin: 0; }
     .question-block { border: 0; padding: 0; margin: 0; min-width: 0; }
     .question-block + .question-block { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
     .question { margin: 0; padding: 0; font-size: 1.15rem; font-weight: 750; line-height: 1.45; white-space: pre-wrap; }
@@ -696,7 +1097,7 @@ private enum ApprovalWebPage {
       body { background: #0f172a; color: #f8fafc; }
       .card { background: #1e293b; box-shadow: none; }
       .muted { color: #94a3b8; }
-      input[type=password], textarea, .option { border-color: #475569; background: #0f172a; color: #f8fafc; }
+      input[type=text], input[type=password], textarea, .option { border-color: #475569; background: #0f172a; color: #f8fafc; }
       button.secondary { background: #334155; color: #f8fafc; }
       .action-link { background: #334155; color: #f8fafc; }
       .job-response { background: #052e2b; color: #d1fae5; }

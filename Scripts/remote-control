@@ -7,9 +7,10 @@ domain="gui/$(id -u)"
 service_target="${domain}/${label}"
 plist_path="${HOME}/Library/LaunchAgents/${label}.plist"
 token_path="${HOME}/Library/Application Support/Remote/token"
-health_url="http://100.123.251.91:3010/health"
-approvals_url="http://100.123.251.91:3010/approvals"
-claude_url="http://100.123.251.91:3010/claude"
+health_url="http://127.0.0.1:3010/health"
+public_origin="https://macbook-pro.tailab24a8.ts.net"
+approvals_url="${public_origin}/approvals"
+claude_url="${public_origin}/claude"
 
 is_loaded() {
     launchctl print "${service_target}" >/dev/null 2>&1
@@ -51,6 +52,7 @@ start_remote() {
     echo "Remote approvals: ${approvals_url}"
     echo "Remote Claude: ${claude_url}"
     echo "The login token was copied to the Mac clipboard for Universal Clipboard paste on iPhone."
+    echo "Install the approvals page on the iPhone Home Screen before enabling notifications."
 }
 
 status_remote() {
@@ -58,6 +60,7 @@ status_remote() {
         echo "Remote is running and healthy."
         echo "Approvals: ${approvals_url}"
         echo "Claude tasks: ${claude_url}"
+        echo "Tailscale Serve terminates HTTPS; the local backend is ${health_url}."
         return 0
     fi
     if is_loaded; then

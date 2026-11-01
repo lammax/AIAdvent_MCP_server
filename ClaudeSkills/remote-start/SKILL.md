@@ -7,4 +7,4 @@ allowed-tools: Bash(/Users/lammax/.local/bin/remote-control start)
 
 Run `/Users/lammax/.local/bin/remote-control start` exactly once.
 
-Report whether Remote is healthy. Show `http://100.123.251.91:3010/approvals` for approval requests and `http://100.123.251.91:3010/claude` for submitting full Claude Code tasks. State that the token is in the Mac clipboard. Never read, print, quote, summarize, or expose the token itself.
+Report whether Remote is healthy. Show `https://macbook-pro.tailab24a8.ts.net/approvals` for approval requests and `https://macbook-pro.tailab24a8.ts.net/claude` for submitting full Claude Code tasks. State that the token is in the Mac clipboard and that notifications are enabled from the installed Home Screen PWA. Never read, print, quote, summarize, or expose the token itself.

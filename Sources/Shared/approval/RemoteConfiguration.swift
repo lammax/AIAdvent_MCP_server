@@ -1,15 +1,16 @@
 import Foundation
-import Shared
 
-struct RemoteServiceConfiguration: Sendable {
-    let databasePath: String
-    let timeout: TimeInterval
+public struct RemoteServiceConfiguration: Sendable {
+    public let databasePath: String
+    public let timeout: TimeInterval
 
-    static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
+    public static func load(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> Self {
         let timeout: TimeInterval
         if let rawTimeout = environment["REMOTE_TIMEOUT_SECONDS"] {
             guard let value = Double(rawTimeout), (1...3_600).contains(value) else {
-                throw ConfigurationError.invalidValue("REMOTE_TIMEOUT_SECONDS")
+                throw RemoteConfigurationError.invalidValue("REMOTE_TIMEOUT_SECONDS")
             }
             timeout = value
         } else {
@@ -24,20 +25,28 @@ struct RemoteServiceConfiguration: Sendable {
     }
 }
 
-struct RemoteConfiguration: Sendable {
-    let host: String
-    let port: Int
-    let token: String
-    let databasePath: String
-    let timeout: TimeInterval
-    let claudeExecutablePath: String
-    let claudeWorkingDirectory: String
+public struct RemoteHTTPConfiguration: Sendable {
+    public let host: String
+    public let port: Int
+    public let publicOrigin: URL
+    public let token: String
+    public let databasePath: String
+    public let timeout: TimeInterval
+    public let claudeExecutablePath: String
+    public let claudeWorkingDirectory: String
+    public let vapidConfigurationPath: String
 
-    static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
+    public var usesSecureCookies: Bool {
+        publicOrigin.scheme?.lowercased() == "https"
+    }
+
+    public static func load(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> Self {
         let service = try RemoteServiceConfiguration.load(environment: environment)
         let host = environment["REMOTE_HOST"] ?? "127.0.0.1"
         guard isAllowedHost(host) else {
-            throw ConfigurationError.disallowedHost
+            throw RemoteConfigurationError.disallowedHost
         }
 
         let port = try integer(
@@ -54,14 +63,15 @@ struct RemoteConfiguration: Sendable {
                 token = try String(contentsOfFile: tokenPath, encoding: .utf8)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             } catch {
-                throw ConfigurationError.invalidValue("REMOTE_TOKEN_FILE")
+                throw RemoteConfigurationError.invalidValue("REMOTE_TOKEN_FILE")
             }
         } else {
-            throw ConfigurationError.missingOrWeakToken
+            throw RemoteConfigurationError.missingOrWeakToken
         }
         guard token.count >= 32 else {
-            throw ConfigurationError.missingOrWeakToken
+            throw RemoteConfigurationError.missingOrWeakToken
         }
+
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claudeExecutablePath = NSString(
             string: environment["REMOTE_CLAUDE_PATH"]
@@ -71,26 +81,54 @@ struct RemoteConfiguration: Sendable {
             string: environment["REMOTE_CLAUDE_WORKING_DIRECTORY"]
                 ?? home.appendingPathComponent("Documents/ThisIsMy/Programming/AI").path
         ).expandingTildeInPath
+        let vapidConfigurationPath = NSString(
+            string: environment["REMOTE_VAPID_FILE"]
+                ?? home
+                    .appendingPathComponent("Library/Application Support/Remote")
+                    .appendingPathComponent("vapid.json")
+                    .path
+        ).expandingTildeInPath
 
         var isDirectory: ObjCBool = false
         guard FileManager.default.isExecutableFile(atPath: claudeExecutablePath) else {
-            throw ConfigurationError.invalidValue("REMOTE_CLAUDE_PATH")
+            throw RemoteConfigurationError.invalidValue("REMOTE_CLAUDE_PATH")
         }
         guard FileManager.default.fileExists(
             atPath: claudeWorkingDirectory,
             isDirectory: &isDirectory
         ), isDirectory.boolValue else {
-            throw ConfigurationError.invalidValue("REMOTE_CLAUDE_WORKING_DIRECTORY")
+            throw RemoteConfigurationError.invalidValue("REMOTE_CLAUDE_WORKING_DIRECTORY")
         }
+
+        let defaultAuthority = Self.authority(host: host, port: port)
+        let originString = environment["REMOTE_PUBLIC_ORIGIN"] ?? "http://\(defaultAuthority)"
+        guard let publicOrigin = URL(string: originString),
+              let scheme = publicOrigin.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              publicOrigin.host != nil,
+              publicOrigin.path.isEmpty || publicOrigin.path == "/",
+              publicOrigin.query == nil,
+              publicOrigin.fragment == nil
+        else {
+            throw RemoteConfigurationError.invalidValue("REMOTE_PUBLIC_ORIGIN")
+        }
+
         return Self(
             host: host,
             port: port,
+            publicOrigin: publicOrigin,
             token: token,
             databasePath: service.databasePath,
             timeout: service.timeout,
             claudeExecutablePath: claudeExecutablePath,
-            claudeWorkingDirectory: claudeWorkingDirectory
+            claudeWorkingDirectory: claudeWorkingDirectory,
+            vapidConfigurationPath: vapidConfigurationPath
         )
+    }
+
+    public static func authority(host: String, port: Int) -> String {
+        let formattedHost = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return "\(formattedHost):\(port)"
     }
 
     private static func integer(
@@ -101,7 +139,7 @@ struct RemoteConfiguration: Sendable {
     ) throws -> Int {
         guard let rawValue else { return defaultValue }
         guard let value = Int(rawValue), range.contains(value) else {
-            throw ConfigurationError.invalidValue(name)
+            throw RemoteConfigurationError.invalidValue(name)
         }
         return value
     }
@@ -124,12 +162,12 @@ struct RemoteConfiguration: Sendable {
     }
 }
 
-private enum ConfigurationError: LocalizedError {
+public enum RemoteConfigurationError: LocalizedError, Sendable {
     case disallowedHost
     case missingOrWeakToken
     case invalidValue(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .disallowedHost:
             "REMOTE_HOST must be a loopback or Tailscale address."
