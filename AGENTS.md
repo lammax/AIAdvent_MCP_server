@@ -59,6 +59,16 @@ Prefer project-root scoped paths and configuration through arguments/environment
 
 Do not add hidden background side effects to `ListTools`; execution belongs in `CallTool`.
 
+## Remote deployment
+
+Install Remote production binaries with `Scripts/remote-install <product> <built-binary>`.
+This signs with the certificate fingerprint stored locally in
+`~/Library/Application Support/Remote/signing-identity`, verifies the persistent
+code identity, backs up the installed files, and refuses installation during active jobs.
+Never replace installed Remote binaries with unsigned/ad hoc build output: this can
+invalidate macOS Documents permissions and block unattended tasks. Keep certificate
+selection local; do not commit credentials or reset macOS privacy permissions.
+
 ## Validation
 
 After Swift changes, run:

@@ -18,7 +18,18 @@ The `remote_mode` MCP tool reads/sets one agent's mode. Modes guide message rout
 The authenticated `/codex` page starts separate Codex CLI tasks in a selected existing project.
 The allowed project list is `~/Library/Application Support/Remote/projects.json` (objects with `name` and absolute `path`).
 Only those canonical directories are execution roots. `REMOTE_CODEX_PATH` can override the installed Codex CLI path.
-Tasks use workspace-write sandboxing and never bypass host permissions. They use the CLI's configured model and authentication.
+Tasks use a Remote-only permission profile derived from `:workspace`, with explicit
+write access to the selected project's `.git`. `.codex`, `.agents`, and `.aws` remain
+read-only. Command network access uses Codex's network proxy and allows only the
+HTTPS hosts of the project's `origin` fetch/push URLs. Other destinations and direct
+connections are blocked. No HTTPS origin means command network access is disabled.
+SSH Git remotes are not configured by this profile; use an HTTPS origin for unattended push.
+The profile is passed per process; global Codex configuration and host network routes
+are unchanged. Codex must support named permission profiles and the network proxy.
+Tasks never bypass host permissions and use the CLI's configured model and authentication.
+Requested commits are followed by a normal push and upstream synchronization check;
+destructive Git operations require a separate explicit instruction. This last rule
+is agent guidance, not an OS-level ban: `.git` write access permits Git state changes.
 Results are persisted and displayed on `/codex`; these are new tasks, not continuations of a selected desktop chat.
 Interrupted Codex jobs are marked failed rather than replayed after restart.
 
@@ -66,6 +77,35 @@ swift build -c release --product RemoteHTTPServer
 swift build -c release --product RemoteMCPServer
 swift test --filter RemoteTests
 ```
+
+### Signed production updates
+
+Remote production binaries must retain a certificate-backed signing identity so
+macOS can recognize them across rebuilds. One-time setup stores the chosen personal
+Apple Development certificate's SHA-1 fingerprint (from `security find-identity -v -p codesigning`)
+in `~/Library/Application Support/Remote/signing-identity` with mode `600`.
+This file contains a certificate identifier, not its private key. Signing uses macOS Keychain.
+
+After building, install with the helper instead of copying raw build output:
+
+```bash
+Scripts/remote-install RemoteHTTPServer .build/out/Products/Release/RemoteHTTPServer --check-only
+Scripts/remote-install RemoteHTTPServer .build/out/Products/Release/RemoteHTTPServer
+```
+
+For the native SwiftPM build engine, use the binary under `.build/release/` instead.
+The `MCPServer_Shared.bundle` directory must be next to the source binary.
+The helper verifies signing, preserves the identity after the initial migration from
+ad hoc signing, refuses updates during active jobs, backs up the installed binary and
+resources, and restarts/checks HTTP. It also supports `RemoteMCPServer`; existing MCP
+clients keep their current process until reconnected.
+
+After the first signed install, grant **Documents** access on the Mac once and test
+a real task using a project in Documents. Reinstall with the same certificate and
+repeat that test to confirm the permission survives. Signing/health checks alone do
+not verify Documents access. Do this acceptance check while physically at the Mac.
+Full Disk Access is not needed for this setup. Preserve the signing identity on later
+updates; certificate replacement or expiration requires a separate planned check.
 
 ### Configuration
 

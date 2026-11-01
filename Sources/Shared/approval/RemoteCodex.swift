@@ -26,6 +26,29 @@ public struct RemoteProject: Codable, Sendable, Equatable {
     }
 }
 
+/// A per-run profile: git metadata is writable, while other workspace safeguards remain.
+public enum RemoteCodexPermissions {
+    public static func httpsGitHost(_ remote: String) -> String? {
+        guard let url = URLComponents(string: remote.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme == "https", let host = url.host?.lowercased(),
+              host.contains("."), host.unicodeScalars.allSatisfy({
+                  CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-").contains($0)
+              }) else { return nil }
+        return host
+    }
+
+    public static func overrides(gitHosts: Set<String>) -> [String] {
+        // Use an inline TOML table: CLI dotted overrides cannot safely address a '.git' key.
+        let hosts = gitHosts.sorted().filter { httpsGitHost("https://" + $0) == $0 }
+        let domains = hosts.map { "\"\($0)\"=\"allow\"" }.joined(separator: ",")
+        return [
+            "default_permissions=\"remote-project\"",
+            "features.network_proxy=true",
+            "permissions.remote-project={extends=\":workspace\",filesystem={\":workspace_roots\"={\".\"=\"write\",\".git\"=\"write\",\".codex\"=\"read\",\".agents\"=\"read\",\".aws\"=\"read\"}},network={enabled=\(!hosts.isEmpty),domains={\(domains)}}}"
+        ]
+    }
+}
+
 public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
     public let claude: ClaudeCLIRunner
     public let codexPath: String
@@ -50,8 +73,26 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: codexPath)
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
-            process.arguments = [
-                "exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
+            var gitHosts = Set<String>()
+            for flags in [["--all"], ["--push", "--all"]] {
+                let git = Process()
+                git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                git.arguments = ["-C", directory, "remote", "get-url"] + flags + ["origin"]
+                let output = Pipe()
+                git.standardOutput = output
+                git.standardError = FileHandle.nullDevice
+                try git.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                git.waitUntilExit()
+                if git.terminationStatus == 0 {
+                    for remote in (String(data: data, encoding: .utf8) ?? "").split(separator: "\n") {
+                        if let host = RemoteCodexPermissions.httpsGitHost(String(remote)) { gitHosts.insert(host) }
+                    }
+                }
+            }
+            process.arguments = ["exec", "--skip-git-repo-check"]
+                + RemoteCodexPermissions.overrides(gitHosts: gitHosts).flatMap { ["-c", $0] }
+                + [
                 "-c", "approval_policy=\"never\"",
                 "-c", "mcp_servers.remote.required=true",
                 "-C", directory, "--output-last-message", outputURL.path,
@@ -62,6 +103,11 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 Each such call automatically queues Web Push. Never fabricate a human answer.
                 Return your final report as the final response; Remote displays it on the task page.
                 Host sandbox and approval restrictions still apply.
+                A Remote-only permission profile allows project edits and git commits.
+                Command network access is restricted to this project's HTTPS origin hosts.
+                Commit only when requested; after a requested commit, push normally to the
+                configured upstream and verify synchronization. Never force-push or perform
+                destructive git operations without a separate explicit user instruction.
 
                 User request:
                 \(job.prompt)

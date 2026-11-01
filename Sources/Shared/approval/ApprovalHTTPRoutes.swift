@@ -1021,6 +1021,13 @@ private enum ApprovalWebPage {
           const jobsState = document.getElementById('jobs');
           let submittingPrompt = false;
           let renderedJobs = null;
+          const expandedJobOutputs = new Set();
+          try {
+            JSON.parse(sessionStorage.getItem('remote-expanded-outputs') || '[]').forEach(id => expandedJobOutputs.add(id));
+          } catch (_) {}
+          const outputObserver = new ResizeObserver(entries => {
+            entries.forEach(entry => entry.target.updateDisclosure());
+          });
 
           function node(tag, className, text) {
             const element = document.createElement(tag);
@@ -1052,7 +1059,33 @@ private enum ApprovalWebPage {
             }
           }
 
+          function appendJobOutput(article, job, className, text) {
+            const output = node('pre', className, text);
+            const toggle = node('button', 'secondary output-toggle');
+            toggle.type = 'button';
+            output.id = 'job-output-' + job.id;
+            toggle.setAttribute('aria-controls', output.id);
+            output.updateDisclosure = () => {
+              const expanded = expandedJobOutputs.has(job.id);
+              output.classList.toggle('output-collapsed', !expanded);
+              toggle.hidden = !expanded && output.scrollHeight <= output.clientHeight + 1;
+              toggle.textContent = expanded ? 'Свернуть' : 'Развернуть';
+              toggle.setAttribute('aria-expanded', String(expanded));
+            };
+            toggle.addEventListener('click', () => {
+              if (expandedJobOutputs.has(job.id)) expandedJobOutputs.delete(job.id);
+              else expandedJobOutputs.add(job.id);
+              try { sessionStorage.setItem('remote-expanded-outputs', JSON.stringify([...expandedJobOutputs])); } catch (_) {}
+              output.updateDisclosure();
+            });
+            toggle.hidden = true;
+            output.classList.toggle('output-collapsed', !expandedJobOutputs.has(job.id));
+            article.append(output, toggle);
+            outputObserver.observe(output);
+          }
+
           function renderJobs(jobs) {
+            outputObserver.disconnect();
             jobsState.replaceChildren();
             if (!jobs.length) {
               const empty = node('div', 'card');
@@ -1073,9 +1106,9 @@ private enum ApprovalWebPage {
               } else if (job.status === 'running') {
                 article.append(node('p', 'muted', 'Claude is working. Approval questions will appear on the Approvals page.'));
               } else if (job.status === 'completed') {
-                article.append(node('pre', 'job-response', job.response || 'Completed without a text response.'));
+                appendJobOutput(article, job, 'job-response', job.response || 'Completed without a text response.');
               } else if (job.status === 'failed') {
-                article.append(node('pre', 'job-error', job.errorMessage || 'Claude failed.'));
+                appendJobOutput(article, job, 'job-error', job.errorMessage || 'Claude failed.');
               }
               jobsState.append(article);
             });
@@ -1194,6 +1227,8 @@ private enum ApprovalWebPage {
     .job-response, .job-error { margin: 16px 0 0; padding: 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
     .job-response { background: #ecfdf5; color: #064e3b; }
     .job-error { background: #fef2f2; color: #991b1b; }
+    .output-collapsed { max-height: calc(12em + 28px); overflow: hidden; }
+    button.output-toggle { margin-top: 10px; }
     @media (prefers-color-scheme: dark) {
       body { background: #0f172a; color: #f8fafc; }
       .card { background: #1e293b; box-shadow: none; }
