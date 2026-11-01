@@ -1133,7 +1133,7 @@ private enum ApprovalWebPage {
                 const projectInput = document.getElementById('project');
                 const sendProjects = fetch('/api/remote/projects', { credentials: 'same-origin' })
                   .then(r => { if (!r.ok) throw new Error(); return r.json(); })
-                  .then(projects => projects.forEach(p => projectInput.add(new Option(p.name + ' — ' + p.path, p.path))))
+                  .then(projects => projects.forEach(p => projectInput.add(new Option(p.name, p.path))))
                   .catch(() => { document.getElementById('composer-message').textContent = 'Unable to load registered projects.'; });
                 const promptInput = document.getElementById('prompt');
                 """)
