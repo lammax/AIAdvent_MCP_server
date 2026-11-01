@@ -1,11 +1,16 @@
 ---
 name: remote-push
 description: Send one explicit end-to-end Remote Web Push request to the iPhone and wait for the user's acknowledgement through the authoritative approval flow.
-disable-model-invocation: true
 allowed-tools:
   - Bash(/Users/lammax/.local/bin/remote-control test)
   - mcp__remote__ask_user
 ---
+
+Use this skill when the user requests a Remote push or a test notification on the iPhone. It may be invoked by Claude through the Skill tool.
+
+Remote is the user's custom Swift service. Never substitute Claude's built-in `PushNotification` or Claude Remote Control for this workflow. Terminal activity does not suppress this service's Web Push.
+
+For an ordinary Remote report or question already sent through `mcp__remote__ask_user`, its push is queued automatically. Do not create a second approval solely to accompany that report with a notification.
 
 Run `/Users/lammax/.local/bin/remote-control test` exactly once. If Remote is not healthy or its MCP registration is unavailable, report the failure and do not create a request.
 
