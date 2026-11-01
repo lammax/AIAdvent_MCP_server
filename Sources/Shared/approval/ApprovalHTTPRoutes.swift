@@ -1047,19 +1047,19 @@ private enum ApprovalWebPage {
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: #f2f4f7; color: #111827; padding: max(20px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
     .shell, .login-card { width: min(100%, 680px); margin: 0 auto; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
-    nav { display: flex; align-items: center; gap: 8px; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
     nav form { margin: 0; }
     h1 { margin: 2px 0 0; font-size: clamp(1.7rem, 7vw, 2.4rem); line-height: 1.1; }
     h2 { margin: 0 0 8px; font-size: 1.15rem; }
     .eyebrow { margin: 0; color: #2563eb; font-size: .78rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
-    .card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
+    .card { min-width: 0; max-width: 100%; background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
     .login-card { margin-top: 10vh; }
     label { display: block; font-weight: 650; margin: 18px 0 8px; }
     input[type=text], input[type=password], textarea { width: 100%; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font: inherit; }
     input[readonly] { background: #f8fafc; color: #475569; }
     textarea { margin-top: 14px; resize: vertical; }
-    button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; }
+    button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; overflow-wrap: anywhere; }
     button:disabled { opacity: .55; }
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
     .action-link { display: inline-flex; align-items: center; min-height: 42px; border-radius: 13px; padding: 10px 14px; background: #e2e8f0; color: #1e293b; font-weight: 750; text-decoration: none; }
@@ -1071,11 +1071,12 @@ private enum ApprovalWebPage {
     .button-row button { width: auto; min-height: 42px; margin: 0; }
     .question-block { border: 0; padding: 0; margin: 0; min-width: 0; }
     .question-block + .question-block { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
-    .question { margin: 0; padding: 0; font-size: 1.15rem; font-weight: 750; line-height: 1.45; white-space: pre-wrap; }
-    .options { margin-top: 14px; }
-    .option { display: flex; align-items: flex-start; gap: 12px; margin: 10px 0; padding: 14px; border: 1px solid #cbd5e1; border-radius: 14px; line-height: 1.35; }
+    .question { margin: 0; padding: 0; font-size: 1.15rem; font-weight: 750; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+    .options { min-width: 0; max-width: 100%; margin-top: 14px; }
+    .option { display: flex; align-items: flex-start; gap: 12px; min-width: 0; max-width: 100%; margin: 10px 0; padding: 14px; border: 1px solid #cbd5e1; border-radius: 14px; line-height: 1.35; }
     .option input { width: 22px; height: 22px; margin: 0; flex: 0 0 auto; }
-    .muted { color: #64748b; line-height: 1.5; }
+    .option span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+    .muted { color: #64748b; line-height: 1.5; overflow-wrap: anywhere; }
     .empty, .success { margin: 0; font-size: 1.15rem; font-weight: 750; }
     .success { color: #047857; }
     .error { color: #b91c1c; font-weight: 650; }
@@ -1089,7 +1090,7 @@ private enum ApprovalWebPage {
     .status-running { background: #dbeafe; color: #1d4ed8; }
     .status-completed { background: #d1fae5; color: #047857; }
     .status-failed { background: #fee2e2; color: #b91c1c; }
-    .job-prompt { margin: 14px 0 0; font-size: 1rem; line-height: 1.5; white-space: pre-wrap; }
+    .job-prompt { margin: 14px 0 0; font-size: 1rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
     .job-response, .job-error { margin: 16px 0 0; padding: 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
     .job-response { background: #ecfdf5; color: #064e3b; }
     .job-error { background: #fef2f2; color: #991b1b; }

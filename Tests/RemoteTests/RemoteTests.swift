@@ -551,6 +551,29 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(response.headers.first(name: "Cache-Control"), "no-store, no-cache, must-revalidate")
     }
 
+    func testApprovalPageWrapsLongUnbrokenContentInsideCards() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let app = try await makeApplication(service: fixture.service, token: fixture.token)
+        defer { Task { try? await app.asyncShutdown() } }
+
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        let response = try await app.sendRequest(.GET, "/approvals", headers: headers)
+        let html = try XCTUnwrap(
+            response.body.getString(
+                at: response.body.readerIndex,
+                length: response.body.readableBytes
+            )
+        )
+
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertTrue(html.contains(".question {"))
+        XCTAssertTrue(html.contains("overflow-wrap: anywhere; word-break: break-word;"))
+        XCTAssertTrue(html.contains(".option span { min-width: 0; overflow-wrap: anywhere;"))
+        XCTAssertTrue(html.contains(".card { min-width: 0; max-width: 100%;"))
+    }
+
     func testRemoteClaudeJobRunsAndPersistsResponse() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
