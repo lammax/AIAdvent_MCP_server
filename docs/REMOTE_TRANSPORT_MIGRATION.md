@@ -11,6 +11,28 @@ The transport and the user-facing Remote application are separate concerns:
 - An ingress transport supplies authenticated HTTPS connectivity from the iPhone to loopback.
 - Web Push remains a notification channel, not the authority that grants an approval.
 
+## Current implementation status
+
+Status legend: **Implemented** is running in production and tested, **Partial** has reusable pieces but does not satisfy the whole phase, and **Planned** has not been implemented.
+
+| Capability | Status | Current state |
+| --- | --- | --- |
+| Loopback-only HTTP backend | **Implemented** | `RemoteHTTPServer` listens on `127.0.0.1:3010` |
+| Private HTTPS ingress | **Implemented** | Tailscale Serve exposes the app to the tailnet only; Funnel is disabled |
+| Persistent local state | **Implemented** | SQLite, token, and stable VAPID configuration remain on the Mac with owner-only permissions |
+| PWA and authenticated Web Push | **Implemented** | Home Screen PWA, service worker, generic payloads, persistent subscriptions, transactional outbox, retries, and stable notification tags are active |
+| Approval workflows | **Implemented** | Single-select, multi-select, free-text, and mixed atomic requests are supported |
+| Remote Claude jobs | **Implemented with known risk** | Jobs persist and run serially, but Claude currently uses `bypassPermissions` |
+| Browser protection | **Implemented baseline** | HMAC-derived Secure/HttpOnly/SameSite session cookie, CSRF token, Origin validation, no-store pages, and security headers |
+| Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
+| Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
+| Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
+| Alternate ingress path | **Planned** | No Headscale, alternate overlay, reverse HTTPS tunnel, or managed access proxy is configured |
+| Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
+| Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
+
+The current Remote test suite contains 32 passing tests after a clean build. Production HTTPS, PWA installation, push delivery, restart persistence, LTE/Wi-Fi access, and iPhone approval responses have also been exercised manually.
+
 ## Important origin constraint
 
 PWA installation, service workers, cookies, notification permission, and push subscriptions are tied to an HTTPS origin. Moving from `macbook-pro.tailab24a8.ts.net` to another hostname will normally require a new login, installing or opening the PWA from the new origin, and enabling notifications again.
@@ -55,14 +77,14 @@ The emergency channel should use a short-lived, single-use challenge bound to on
 
 ## Implementation phases
 
-### Phase 0: Capture the current baseline
+### Phase 0: Capture the current baseline — **Partial**
 
 - Export the current Tailscale Serve configuration and record the working HTTPS origin.
 - Record LaunchAgent, loopback health, tailnet ACL, certificate, and DNS behavior without changing them.
 - Run the current approval, Claude job, push, restart, and LTE/Wi-Fi tests.
 - Confirm the rollback backup includes configuration, not the SQLite database or token contents in logs.
 
-### Phase 1: Remove transport assumptions from Remote
+### Phase 1: Remove transport assumptions from Remote — **Partial**
 
 - Keep `REMOTE_PUBLIC_ORIGIN` as the single application-origin setting.
 - Move Tailscale-specific status checks out of application health and into a transport diagnostics command.
@@ -70,7 +92,7 @@ The emergency channel should use a short-lived, single-use challenge bound to on
 - Ensure generated links, CSRF validation, cookie settings, push deep links, and skill output all derive from the configured public origin.
 - Add tests proving that changing the configured origin changes links and validation without changing stored approvals or Claude jobs.
 
-### Phase 2: Build a non-production alternate path
+### Phase 2: Build a non-production alternate path — **Planned**
 
 - Select one candidate after a short proof of connectivity from the iPhone over Wi-Fi and cellular data.
 - Use a staging hostname and a separate authentication cookie namespace.
@@ -78,14 +100,14 @@ The emergency channel should use a short-lived, single-use challenge bound to on
 - Verify reconnect after Mac sleep, iPhone network changes, process restart, and Mac reboot.
 - Block the Tailscale path during testing to prove the alternate route is genuinely independent.
 
-### Phase 3: Introduce a stable origin
+### Phase 3: Introduce a stable origin — **Planned**
 
 - Configure the production hostname and certificate before changing any client links.
 - Test login, CSRF, PWA installation, push subscription persistence, notification deep links, and token rotation.
 - Schedule the one-time iPhone transition: open the new origin, log in, install/open the PWA, enable notifications, and send a test push.
 - Keep the old Tailscale origin available for a bounded rollback period, but do not allow approvals to be submitted ambiguously through two independent origins without explicit CSRF and cookie tests.
 
-### Phase 4: Cut over and observe
+### Phase 4: Cut over and observe — **Planned**
 
 - Change the configured public origin and all Remote skills together.
 - Run an approval from creation through iPhone response and verify Claude receives the exact answer.
@@ -93,12 +115,42 @@ The emergency channel should use a short-lived, single-use challenge bound to on
 - Monitor ingress reconnects, authentication failures, push delivery, and duplicate submissions without logging sensitive content.
 - Retire the old ingress only after the new path survives the agreed observation period.
 
-### Phase 5: Add carrier-restriction fallback
+### Phase 5: Add carrier-restriction fallback — **Planned**
 
 - Detect prolonged iPhone unreachability, but do not interpret a failed ping alone as approval to change networking.
 - Send a generic SMS or initiate a voice workflow only for an actual pending approval and only after a configured delay.
 - Keep fallback decisions single-use, short-lived, and limited to approve/deny.
 - Test with mobile data unavailable, not merely with Tailscale disconnected.
+
+### Deferred security-hardening track — **Planned; required before broader ingress**
+
+The current deployment is appropriate for personal use inside the private tailnet, but `/claude` is intentionally high trust: an authenticated request starts Claude with `bypassPermissions` and the privileges of the macOS user. Treat the Remote token and every authorized browser session as credentials with consequences comparable to remote shell access.
+
+Complete this track before exposing Remote through a public ingress, shared tailnet, or less trusted transport. It may be scheduled after the current private-tailnet MVP while Tailscale Serve remains `tailnet only` and Funnel remains disabled.
+
+Work in this order:
+
+1. Replace `bypassPermissions` with explicit allow rules and route unmatched Claude permission requests through an approval-specific Remote MCP tool. Keep deny rules non-overridable.
+2. Replace the single deterministic 90-day session with device-specific server-side sessions, individual revocation, idle and absolute expiry, and a view of authorized devices. Token rotation must still revoke every session.
+3. Restrict Tailscale ACL access to the required Mac and iPhone identities, then preserve an equivalent identity boundary for any replacement transport.
+4. Add rate limits and bounded queues for login attempts, approval submissions, push subscription changes, test pushes, and Claude jobs. Failed authentication must not reveal whether a token prefix was correct.
+5. Add configurable retention and secure pruning for completed approvals, Claude prompts/results, push outbox history, and operational logs. Keep audit metadata without retaining task contents indefinitely.
+6. Change Remote log directory and files to owner-only permissions and verify that tokens, prompts, answers, cookies, push secrets, and Claude output are never logged.
+7. Move inline JavaScript and CSS to bundled resources or use per-response CSP nonces; remove `unsafe-inline`. Require the configured HTTPS Origin on browser mutations rather than accepting a missing Origin, while preserving authenticated non-browser Bearer clients explicitly.
+8. Harden push subscription endpoint validation against private-address SSRF and unexpected push providers. Preserve generic notification payloads and stable deduplication tags.
+9. Evaluate moving the Remote token and VAPID private key into macOS Keychain while retaining unattended LaunchAgent startup and a tested recovery procedure.
+10. Add dependency-vulnerability review, update policy, restore testing, and a focused external penetration test for authentication, CSRF, XSS, request smuggling, SSRF, replay, and privilege escalation.
+
+Security acceptance criteria:
+
+- Compromising one authorized iPhone session does not require rotating every other device session.
+- An unknown Claude tool action cannot execute until explicitly approved; a denied action cannot be overridden from the phone.
+- Repeated login and job-submission attempts are rate-limited and cannot grow SQLite or the process queue without bound.
+- No prompt, answer, token, session credential, VAPID secret, or Claude output appears in logs or push payloads.
+- Expired data is pruned according to policy, while active approvals and retryable push deliveries are preserved.
+- Browser mutations without a valid session, CSRF token, and exact production Origin are rejected.
+- The application passes its automated security tests and a manual lost-device, token-rotation, restart, and rollback exercise.
+- Public or shared ingress remains disabled until these criteria and the replacement transport's own security review pass.
 
 ## Acceptance tests
 
@@ -114,6 +166,7 @@ The migration is complete only when all of these pass:
 - Blocking the old transport does not break the alternate path.
 - Rollback restores the old path without database migration or VAPID rotation.
 - Under a strict carrier allowlist, the system clearly reports that the PWA is unreachable and uses only the separately tested emergency channel.
+- Any transport broader than the current private tailnet has passed the deferred security-hardening gate.
 
 ## Decision point
 
@@ -123,4 +176,4 @@ Do not choose a replacement solely by feature list. First determine the failure 
 - If WireGuard or Tailscale endpoints are selectively blocked but general HTTPS works, evaluate a reverse HTTPS ingress with a stable owned domain.
 - If all non-allowlisted mobile data is blocked, no overlay choice is sufficient; prioritize SMS/voice fallback and Wi-Fi operation.
 
-The first engineering step should be Phase 1, because it reduces coupling without committing Remote to any provider.
+The first engineering step should be Phase 1, because it reduces coupling without committing Remote to any provider. The security-hardening track can follow the private-tailnet MVP, but becomes a mandatory gate before any public or shared ingress cutover.
