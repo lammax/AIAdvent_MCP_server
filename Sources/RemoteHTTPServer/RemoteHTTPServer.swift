@@ -15,13 +15,21 @@ enum RemoteHTTPServer {
         app.http.server.configuration.port = configuration.port
 
         let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
+        let remoteHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Remote")
+        let projects = try RemoteProject.load(from: remoteHome.appendingPathComponent("projects.json").path)
+        let codexPath = ProcessInfo.processInfo.environment["REMOTE_CODEX_PATH"]
+            ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
         let approvalService = ApprovalService(
             repository: repository,
             timeout: configuration.timeout
         )
         let claudeService = RemoteClaudeJobService(
             repository: repository,
-            runner: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
+            runner: RemoteAgentRunner(
+                claude: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
+                codexPath: codexPath,
+                projects: projects
+            ),
             workingDirectory: configuration.claudeWorkingDirectory
         )
         try await claudeService.start()
@@ -71,7 +79,9 @@ enum RemoteHTTPServer {
             service: approvalService,
             authorization: authorization,
             claudeService: claudeService,
-            push: pushContext
+            push: pushContext,
+            agentRepository: repository,
+            projects: projects
         )
 
         do {

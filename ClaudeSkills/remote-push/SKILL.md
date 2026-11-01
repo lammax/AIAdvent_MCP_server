@@ -16,6 +16,8 @@ Run `/Users/lammax/.local/bin/remote-control test` exactly once. If Remote is no
 
 Call `mcp__remote__ask_user` exactly once with one `single_select` question:
 
+Include top-level `agent: "claude"`, `project` as the absolute current project directory, and the actual `chat` ID when available.
+
 - ID: `push`
 - Question: use `$ARGUMENTS` verbatim when it is non-empty; otherwise use `Remote push test: подтверди получение уведомления.`
 - Options, in order: `Получено`, `Отклонить`

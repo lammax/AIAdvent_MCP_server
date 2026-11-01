@@ -8,6 +8,7 @@ public enum RemoteClaudeJobStatus: String, Codable, Sendable {
 }
 
 public struct RemoteClaudeJob: Codable, Sendable, Equatable {
+    public let agent: String
     public let id: UUID
     public let prompt: String
     public let workingDirectory: String
@@ -29,7 +30,8 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         sessionID: String? = nil,
         createdAt: Date,
         startedAt: Date? = nil,
-        completedAt: Date? = nil
+        completedAt: Date? = nil,
+        agent: String = "claude"
     ) {
         self.id = id
         self.prompt = prompt
@@ -41,6 +43,7 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         self.createdAt = createdAt
         self.startedAt = startedAt
         self.completedAt = completedAt
+        self.agent = agent
     }
 }
 

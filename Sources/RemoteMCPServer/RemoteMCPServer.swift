@@ -81,7 +81,7 @@ private func parseOptions(_ value: MCP.Value?) throws -> [String] {
     return options
 }
 
-private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
+private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApprovalRepository) async -> MCP.Server {
     let server = Server(
         name: "remote-mcp-server",
         version: "1.0.0",
@@ -90,12 +90,20 @@ private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
 
     await server.withMethodHandler(ListTools.self) { _ in
         .init(tools: [
+            Tool(name: "remote_mode", description: "Read or change Remote mode for one agent. Does not stop the shared HTTP service.",
+                 inputSchema: .object(["type": .string("object"), "properties": .object([
+                    "agent": .object(["type": .string("string"), "enum": .array([.string("codex"), .string("claude")])]),
+                    "enabled": .object(["type": .string("boolean")])
+                 ]), "required": .array([.string("agent")]), "additionalProperties": .bool(false)])),
             Tool(
                 name: "ask_user",
                 description: "Ask one or more questions in a single remote request. Each question can be single-select, multi-select, or free text. A lone free-text question requires an answer; free-text fields in a multi-question request are optional comments. Waits for the human response and never invents an answer. Prefer the questions array; legacy question/mode/options fields remain supported.",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
+                        "agent": .object(["type": .string("string"), "enum": .array([.string("codex"), .string("claude")])]),
+                        "project": .object(["type": .string("string"), "maxLength": .int(1024), "description": .string("Absolute project directory; display context, not execution authority.")]),
+                        "chat": .object(["type": .string("string"), "maxLength": .int(200), "description": .string("Originating chat ID or label.")]),
                         "questions": .object([
                             "type": .string("array"),
                             "minItems": .int(1),
@@ -160,6 +168,22 @@ private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
     }
 
     await server.withMethodHandler(CallTool.self) { params in
+        if params.name == "remote_mode" {
+            do {
+                guard let agent = params.arguments?["agent"]?.stringValue, ["codex", "claude"].contains(agent) else {
+                    throw ToolInputError.invalid("Choose codex or claude.")
+                }
+                if let enabled = params.arguments?["enabled"] {
+                    guard let value = enabled.boolValue else { throw ToolInputError.invalid("enabled must be boolean.") }
+                    try await repository.setRemoteMode(agent: agent, enabled: value)
+                }
+                let modes = try await repository.remoteModes()
+                let enabled = modes.first { $0.agent == agent }?.enabled ?? false
+                return .init(content: [.text(text: "\(agent): \(enabled ? "enabled" : "disabled")", annotations: nil, _meta: nil)], isError: false)
+            } catch {
+                return .init(content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)], isError: true)
+            }
+        }
         guard params.name == "ask_user" else {
             return .init(
                 content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
@@ -167,8 +191,20 @@ private func makeRemoteMCPServer(service: ApprovalService) async -> MCP.Server {
             )
         }
         do {
+            let source: RemoteRequestSource?
+            if let agent = params.arguments?["agent"]?.stringValue {
+                guard ["codex", "claude"].contains(agent),
+                      let project = params.arguments?["project"]?.stringValue,
+                      project.hasPrefix("/"), project.count <= 1024,
+                      (params.arguments?["chat"]?.stringValue?.count ?? 0) <= 200
+                else { throw ToolInputError.invalid("Source requires a valid agent and absolute project directory.") }
+                source = RemoteRequestSource(agent: agent, project: project, chat: params.arguments?["chat"]?.stringValue)
+            } else {
+                source = nil
+            }
             let approval = try await service.createAndWait(
-                questions: try parseQuestions(arguments: params.arguments)
+                questions: try parseQuestions(arguments: params.arguments),
+                source: source
             )
             let answers = approval.questions.map {
                 ApprovalToolAnswer(
@@ -230,9 +266,23 @@ enum RemoteMCPServer {
     static func main() async throws {
         let configuration = try RemoteServiceConfiguration.load()
         let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
+        let arguments = CommandLine.arguments
+        if let index = arguments.firstIndex(of: "--agent-mode") {
+            guard arguments.count == index + 3,
+                  ["codex", "claude"].contains(arguments[index + 1]),
+                  ["start", "stop", "status"].contains(arguments[index + 2]) else {
+                throw ToolInputError.invalid("Use --agent-mode codex|claude start|stop|status")
+            }
+            let agent = arguments[index + 1]
+            let action = arguments[index + 2]
+            if action != "status" { try await repository.setRemoteMode(agent: agent, enabled: action == "start") }
+            let enabled = try await repository.remoteModes().first { $0.agent == agent }?.enabled ?? false
+            print("\(agent): \(enabled ? "enabled" : "disabled")")
+            return
+        }
         let service = ApprovalService(repository: repository, timeout: configuration.timeout)
-        let server = await makeRemoteMCPServer(service: service)
-        let transport = StdioTransport()
+        let server = await makeRemoteMCPServer(service: service, repository: repository)
+        let transport = RemoteMCPTransport(base: StdioTransport())
 
         try await server.start(transport: transport)
         await server.waitUntilCompleted()

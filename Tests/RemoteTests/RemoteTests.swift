@@ -1,10 +1,105 @@
 import Foundation
 import GRDB
+import MCP
 import XCTest
 import XCTVapor
 @testable import Shared
 
 final class RemoteTests: XCTestCase {
+    func testCodexInitializeAcceptsObjectExperimentalCapabilities() throws {
+        let raw = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"codex","version":"test"},"capabilities":{"experimental":{"extension":{},"known":"value"},"roots":{"listChanged":true}}}}"#.utf8)
+        let normalized = RemoteMCPTransport.normalizeInitialize(raw)
+        let message = try XCTUnwrap(JSONSerialization.jsonObject(with: normalized) as? [String: Any])
+        let params = try XCTUnwrap(message["params"] as? [String: Any])
+        let decoded = try JSONDecoder().decode(Initialize.Parameters.self,
+                                              from: JSONSerialization.data(withJSONObject: params))
+        XCTAssertEqual(decoded.capabilities.experimental, ["known": "value"])
+        XCTAssertEqual(decoded.capabilities.roots?.listChanged, true)
+        let toolRequest = Data(#"{"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"Original"}}}"#.utf8)
+        XCTAssertEqual(RemoteMCPTransport.normalizeInitialize(toolRequest), toolRequest)
+    }
+    func testAgentModesAreIndependentAndSurviveRestart() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        try await fixture.repository.setRemoteMode(agent: "claude", enabled: true)
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: true)
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: false)
+        let path = await fixture.repository.path
+        let reopened = try SQLiteApprovalRepository(path: path)
+        let modes = try await reopened.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, true)
+        XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, false)
+    }
+
+    func testSourceSurvivesAnswerAndDoesNotRouteToOtherRequest() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let source = RemoteRequestSource(agent: "codex", project: "/projects/one", chat: "chat-one")
+        let first = try await fixture.service.create(
+            questions: [ApprovalQuestion(id: "answer", question: "First", kind: .singleSelect, options: ["A", "B"])],
+            source: source)
+        let second = try await fixture.service.create(question: "Second", options: ["A", "B"])
+        let answered = try await fixture.service.respond(id: first.id, response: "B")
+        XCTAssertEqual(answered.source, source)
+        let other = try await fixture.service.approval(id: second.id)
+        XCTAssertEqual(other?.status, .pending)
+        XCTAssertNil(other?.source)
+    }
+
+    func testCodexJobKeepsProjectAndDoesNotReplayAfterRestart() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let job = RemoteClaudeJob(id: UUID(), prompt: "Inspect", workingDirectory: fixture.directory.path,
+                                 status: .queued, createdAt: Date(), agent: "codex")
+        try await fixture.repository.createClaudeJob(job)
+        let claimed = try await fixture.repository.claimNextClaudeJob(startedAt: Date())
+        XCTAssertEqual(claimed?.agent, "codex")
+        XCTAssertEqual(claimed?.workingDirectory, fixture.directory.path)
+        try await fixture.repository.requeueInterruptedClaudeJobs()
+        let interrupted = try await fixture.repository.claudeJob(id: job.id)
+        XCTAssertEqual(interrupted?.status, .failed)
+        let replay = try await fixture.repository.claimNextClaudeJob(startedAt: Date())
+        XCTAssertNil(replay)
+    }
+
+    func testProjectAllowlistRejectsUnregisteredAndTraversalPaths() throws {
+        let directory = FileManager.default.temporaryDirectory
+        let projects = [RemoteProject(name: "Test", path: directory.path)]
+        XCTAssertEqual(try RemoteProject.resolve(directory.path, in: projects),
+                       directory.resolvingSymlinksInPath().standardizedFileURL.path)
+        XCTAssertThrowsError(try RemoteProject.resolve("/", in: projects))
+        XCTAssertThrowsError(try RemoteProject.resolve(directory.appendingPathComponent("..").path, in: projects))
+    }
+
+    func testCodexHTTPRequiresAuthenticationModeAndRegisteredProject() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let jobs = RemoteClaudeJobService(repository: fixture.repository, runner: StubClaudeRunner(),
+                                         workingDirectory: fixture.directory.path)
+        configureApprovalHTTPRoutes(app: app, service: fixture.service,
+                                    authorization: ApprovalHTTPAuthorization(token: fixture.token),
+                                    claudeService: jobs, agentRepository: fixture.repository,
+                                    projects: [RemoteProject(name: "Test", path: fixture.directory.path)])
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        let unauthorized = try await app.sendRequest(.GET, "/api/remote/projects")
+        XCTAssertEqual(unauthorized.status, .unauthorized)
+        headers.contentType = .json
+        let body = byteBuffer(String(decoding: try JSONEncoder().encode(["prompt": "Test", "project": fixture.directory.path]), as: UTF8.self))
+        let disabled = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: body)
+        XCTAssertEqual(disabled.status, .conflict)
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: true)
+        let unregistered = try await app.sendRequest(.POST, "/codex/jobs", headers: headers,
+            body: byteBuffer(#"{"prompt":"Test","project":"/"}"#))
+        XCTAssertEqual(unregistered.status, .badRequest)
+        let accepted = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: body)
+        XCTAssertEqual(accepted.status, .ok)
+        let job = try accepted.content.decode(RemoteClaudeJobResponse.self)
+        XCTAssertEqual(job.agent, "codex")
+        XCTAssertEqual(job.workingDirectory, fixture.directory.resolvingSymlinksInPath().path)
+    }
     func testPushMigrationPreservesExistingApprovalsAndClaudeJobs() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("RemoteMigrationTests-\(UUID().uuidString)", isDirectory: true)

@@ -4,6 +4,31 @@ Local Swift MCP servers used by WorkHarness and related agent tooling. Each serv
 
 ## Remote
 
+### Codex and per-agent mode
+
+Use `remote-control start --agent codex` or `start --agent claude` to enable that agent.
+Use `stop --agent codex|claude` to disable only that agent; the shared HTTP service remains running.
+The unqualified `stop` is the explicit whole-service administration command.
+Modes persist in SQLite. An absent Codex mode is disabled; legacy Claude requests remain compatible.
+
+MCP `ask_user` accepts optional `agent`, absolute `project`, and `chat` context.
+Answers remain bound to the request UUID, not the selected UI filter. Approvals can be filtered by agent and project.
+The `remote_mode` MCP tool reads/sets one agent's mode. Modes guide message routing; they do not grant filesystem or sandbox permissions.
+
+The authenticated `/codex` page starts separate Codex CLI tasks in a selected existing project.
+The allowed project list is `~/Library/Application Support/Remote/projects.json` (objects with `name` and absolute `path`).
+Only those canonical directories are execution roots. `REMOTE_CODEX_PATH` can override the installed Codex CLI path.
+Tasks use workspace-write sandboxing and never bypass host permissions. They use the CLI's configured model and authentication.
+Results are persisted and displayed on `/codex`; these are new tasks, not continuations of a selected desktop chat.
+Interrupted Codex jobs are marked failed rather than replayed after restart.
+
+Install `CodexSkills/remote-mode` and `CodexSkills/remote-push` under `~/.codex/skills/`.
+The MCP configuration should allow a tool timeout exceeding Remote's 300-second wait (for example `tool_timeout_sec = 360`).
+For unattended question delivery, configure only `mcp_servers.remote.tools.ask_user.approval_mode = "approve"`.
+This preauthorizes the question relay, not filesystem or shell actions. The web worker requires Remote MCP startup to succeed.
+Remote's stdio adapter ignores unsupported non-string experimental capability entries that the current Swift MCP SDK cannot decode.
+Refresh the app's MCP connection or restart the app after replacing the stdio binary/schema.
+
 `RemoteMCPServer` lets an MCP client pause on `ask_user`, display the decision in a mobile browser, and return the exact option selected by the user. `RemoteHTTPServer` owns HTTP, the PWA, Web Push, and the `/claude` page that queues full Claude Code tasks on the Mac. Both processes share the same SQLite database.
 
 ### Installed setup

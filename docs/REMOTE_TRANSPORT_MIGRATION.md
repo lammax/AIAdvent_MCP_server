@@ -25,13 +25,15 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Remote Claude jobs | **Implemented with known risk** | Jobs persist and run serially, but Claude currently uses `bypassPermissions` |
 | Browser protection | **Implemented baseline** | HMAC-derived Secure/HttpOnly/SameSite session cookie, CSRF token, Origin validation, no-store pages, and security headers |
 | Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
+| Independent agent modes and request context | **Implemented; iPhone verification pending** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive |
+| Codex tasks in existing projects | **Implemented; basic live check passed** | Separate `/codex` page, eight registered projects, workspace-write sandbox, persistent job results; live task returned `REMOTE_CODEX_OK`; desktop chat continuation is not implemented |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
 | Alternate ingress path | **Planned** | No Headscale, alternate overlay, reverse HTTPS tunnel, or managed access proxy is configured |
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-The current Remote test suite contains 32 passing tests after a clean build. Production HTTPS, PWA installation, push delivery, restart persistence, LTE/Wi-Fi access, and iPhone approval responses have also been exercised manually.
+The current Remote test suite contains 39 passing tests. Production HTTPS, PWA installation, push delivery, restart persistence, LTE/Wi-Fi access, and iPhone approval responses have also been exercised manually for the original Claude flow. Codex routing and new project controls need their own iPhone acceptance check.
 
 ## Important origin constraint
 

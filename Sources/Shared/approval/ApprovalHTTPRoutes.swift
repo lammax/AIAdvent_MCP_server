@@ -2,6 +2,9 @@ import Foundation
 import CryptoKit
 import Vapor
 
+extension RemoteProject: Content {}
+extension RemoteAgentMode: Content {}
+
 public struct ApprovalHTTPAuthorization: Sendable {
     public static let cookieName = "remote-auth"
     private static let sessionLifetime = 60 * 60 * 24 * 90
@@ -137,7 +140,9 @@ public func configureApprovalHTTPRoutes(
     service: ApprovalService,
     authorization: ApprovalHTTPAuthorization,
     claudeService: RemoteClaudeJobService? = nil,
-    push: RemotePushHTTPContext? = nil
+    push: RemotePushHTTPContext? = nil,
+    agentRepository: SQLiteApprovalRepository? = nil,
+    projects: [RemoteProject] = []
 ) {
     app.get { request in
         request.redirect(to: "/approvals")
@@ -145,6 +150,37 @@ public func configureApprovalHTTPRoutes(
 
     app.get("health") { _ in
         ApprovalHealthResponse(status: "ok")
+    }
+
+    app.get("api", "remote", "modes") { request async throws -> [RemoteAgentMode] in
+        try requireAuthorization(request, authorization: authorization)
+        return try await agentRepository?.remoteModes() ?? []
+    }
+    app.get("api", "remote", "projects") { request throws -> [RemoteProject] in
+        try requireAuthorization(request, authorization: authorization)
+        return projects
+    }
+    app.get("codex") { request -> Response in
+        guard authorization.isAuthorized(request) else { return request.redirect(to: "/login") }
+        guard claudeService != nil else { return Response(status: .notFound) }
+        return htmlResponse(ApprovalWebPage.codex(csrfToken: authorization.csrfTokenValue))
+    }
+    app.get("codex", "jobs") { request async throws -> RemoteClaudeJobListResponse in
+        try requireAuthorization(request, authorization: authorization)
+        guard let claudeService else { throw Abort(.notFound) }
+        return RemoteClaudeJobListResponse(jobs: try await claudeService.recentJobs(limit: 100).filter { $0.agent == "codex" })
+    }
+    app.post("codex", "jobs") { request async throws -> RemoteClaudeJobResponse in
+        try requireMutationAuthorization(request, authorization: authorization)
+        guard let claudeService else { throw Abort(.notFound) }
+        let body = try request.content.decode(RemoteCodexSubmitRequest.self)
+        guard try await agentRepository?.remoteModes().first(where: { $0.agent == "codex" })?.enabled == true else {
+            throw Abort(.conflict, reason: "Enable Codex Remote mode first.")
+        }
+        let project: String
+        do { project = try RemoteProject.resolve(body.project, in: projects) }
+        catch { throw Abort(.badRequest, reason: "Choose a registered project.") }
+        return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt, agent: "codex", project: project))
     }
 
     app.get("manifest.webmanifest") { _ throws -> Response in
@@ -282,7 +318,7 @@ public func configureApprovalHTTPRoutes(
     app.get("claude", "jobs") { request async throws -> RemoteClaudeJobListResponse in
         try requireAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
-        return RemoteClaudeJobListResponse(jobs: try await claudeService.recentJobs())
+        return RemoteClaudeJobListResponse(jobs: try await claudeService.recentJobs(limit: 100).filter { $0.agent == "claude" })
     }
 
     app.get("claude", "jobs", ":jobID") { request async throws -> RemoteClaudeJobResponse in
@@ -302,6 +338,10 @@ public func configureApprovalHTTPRoutes(
     app.post("claude", "jobs") { request async throws -> RemoteClaudeJobResponse in
         try requireMutationAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
+        if let modes = try await agentRepository?.remoteModes(),
+           modes.first(where: { $0.agent == "claude" })?.enabled == false {
+            throw Abort(.conflict, reason: "Claude Remote mode is disabled.")
+        }
         let body = try request.content.decode(RemoteClaudeSubmitRequest.self)
         do {
             return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt))
@@ -535,6 +575,11 @@ private struct RemoteClaudeSubmitRequest: Content, Sendable {
     let prompt: String
 }
 
+private struct RemoteCodexSubmitRequest: Content, Sendable {
+    let prompt: String
+    let project: String
+}
+
 public struct RemoteClaudeJobListResponse: Content, Sendable {
     public let jobs: [RemoteClaudeJobResponse]
 
@@ -544,6 +589,7 @@ public struct RemoteClaudeJobListResponse: Content, Sendable {
 }
 
 public struct RemoteClaudeJobResponse: Content, Sendable {
+    public let agent: String
     public let id: UUID
     public let prompt: String
     public let workingDirectory: String
@@ -556,6 +602,7 @@ public struct RemoteClaudeJobResponse: Content, Sendable {
     public let completedAt: Date?
 
     public init(_ job: RemoteClaudeJob) {
+        agent = job.agent
         id = job.id
         prompt = job.prompt
         workingDirectory = job.workingDirectory
@@ -570,6 +617,7 @@ public struct RemoteClaudeJobResponse: Content, Sendable {
 }
 
 public struct ApprovalResponse: Content, Sendable {
+    public let source: RemoteRequestSource?
     public let id: UUID
     public let questions: [ApprovalQuestion]
     public let question: String
@@ -583,6 +631,7 @@ public struct ApprovalResponse: Content, Sendable {
     public let answeredAt: Date?
 
     public init(_ approval: Approval) {
+        self.source = approval.source
         self.id = approval.id
         self.questions = approval.questions
         self.question = approval.question
@@ -652,7 +701,7 @@ private enum ApprovalWebPage {
           <main class="shell">
             <header>
               <div><p class="eyebrow">Remote</p><h1>Pending approvals</h1></div>
-              <nav><a class="secondary action-link" href="/claude">Claude</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="\(csrfToken)"><button class="secondary" type="submit">Sign out</button></form></nav>
+              <nav><a class="secondary action-link" href="/claude">Claude</a><a class="action-link" href="/codex">Codex</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="\(csrfToken)"><button class="secondary" type="submit">Sign out</button></form></nav>
             </header>
             <section class="card notification-card" aria-labelledby="notification-title">
               <h2 id="notification-title">Notifications</h2>
@@ -663,6 +712,12 @@ private enum ApprovalWebPage {
                 <button id="disable-notifications" class="secondary" type="button">Disable</button>
               </div>
             </section>
+            <section class="card composer">
+              <label for="agent-filter">Agent</label>
+              <select id="agent-filter"><option value="">All agents</option><option value="codex">Codex</option><option value="claude">Claude</option></select>
+              <label for="project-filter">Project</label>
+              <select id="project-filter"><option value="">All projects</option></select>
+            </section>
             <section id="state" class="card"><p class="muted">Loading…</p></section>
           </main>
           <script>
@@ -672,6 +727,20 @@ private enum ApprovalWebPage {
           let submitting = false;
           let renderedSignature = null;
           let formDirty = false;
+          const agentFilter = document.getElementById('agent-filter');
+          const projectFilter = document.getElementById('project-filter');
+          let latestApprovals = [];
+          function filterApprovals() {
+            if (formDirty) return;
+            render(latestApprovals.filter(a =>
+              (!agentFilter.value || a.source?.agent === agentFilter.value) &&
+              (!projectFilter.value || a.source?.project === projectFilter.value)));
+          }
+          [agentFilter, projectFilter].forEach(select => select.addEventListener('change', () => {
+            if (formDirty && !window.confirm('Discard unsent answers and change filter?')) return;
+            formDirty = false;
+            filterApprovals();
+          }));
 
           function node(tag, className, text) {
             const element = document.createElement(tag);
@@ -692,7 +761,12 @@ private enum ApprovalWebPage {
               if (signature === renderedSignature) return;
               if (formDirty && state.querySelector('form')) return;
               renderedSignature = signature;
-              render(approvals);
+              latestApprovals = approvals;
+              const selectedProject = projectFilter.value;
+              const paths = [...new Set(approvals.map(a => a.source?.project).filter(Boolean))];
+              projectFilter.replaceChildren(new Option('All projects', ''), ...paths.map(p => new Option(p, p)));
+              projectFilter.value = paths.includes(selectedProject) ? selectedProject : '';
+              filterApprovals();
             } catch (_) {
               if (!state.querySelector('form')) {
                 state.replaceChildren(node('p', 'error', 'Unable to reach the approval service. Retrying…'));
@@ -715,6 +789,9 @@ private enum ApprovalWebPage {
             });
             approvals.forEach((approval) => {
               const article = node('article', 'approval');
+              if (approval.source) {
+                article.append(node('p', 'muted', [approval.source.agent, approval.source.project, approval.source.chat].filter(Boolean).join(' · ')));
+              }
               if (approval.id.toLowerCase() === requestedApprovalID) article.classList.add('targeted');
               const form = node('form', 'options');
               approval.questions.forEach((question) => {
@@ -1042,6 +1119,29 @@ private enum ApprovalWebPage {
         """
     }
 
+    static func codex(csrfToken: String) -> String {
+        claude(csrfToken: csrfToken)
+            .replacingOccurrences(of: "/claude", with: "/codex")
+            .replacingOccurrences(of: "Claude", with: "Codex")
+            .replacingOccurrences(of: "<label for=\"prompt\">Request</label>", with: """
+                <p class="muted">Start a separate Codex task in the selected project. Workspace writes are allowed; sandbox restrictions remain active.</p>
+                <label for="project">Project</label>
+                <select id="project" required><option value="">Choose a project…</option></select>
+                <label for="prompt">Request</label>
+                """)
+            .replacingOccurrences(of: "const promptInput = document.getElementById('prompt');", with: """
+                const projectInput = document.getElementById('project');
+                const sendProjects = fetch('/api/remote/projects', { credentials: 'same-origin' })
+                  .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+                  .then(projects => projects.forEach(p => projectInput.add(new Option(p.name + ' — ' + p.path, p.path))))
+                  .catch(() => { document.getElementById('composer-message').textContent = 'Unable to load registered projects.'; });
+                const promptInput = document.getElementById('prompt');
+                """)
+            .replacingOccurrences(of: "JSON.stringify({ prompt })", with: "JSON.stringify({ prompt, project: projectInput.value })")
+            .replacingOccurrences(of: "article.append(heading, node('h2', 'job-prompt', job.prompt));",
+                                  with: "article.append(heading, node('p', 'muted', job.workingDirectory), node('h2', 'job-prompt', job.prompt));")
+    }
+
     private static let sharedStyles = """
     :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
     * { box-sizing: border-box; }
@@ -1056,7 +1156,7 @@ private enum ApprovalWebPage {
     .card { min-width: 0; max-width: 100%; background: white; border-radius: 20px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, .08); }
     .login-card { margin-top: 10vh; }
     label { display: block; font-weight: 650; margin: 18px 0 8px; }
-    input[type=text], input[type=password], textarea { width: 100%; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font: inherit; }
+    input[type=text], input[type=password], textarea, select { width: 100%; min-width: 0; min-height: 50px; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; font: inherit; }
     input[readonly] { background: #f8fafc; color: #475569; }
     textarea { margin-top: 14px; resize: vertical; }
     button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; overflow-wrap: anywhere; }

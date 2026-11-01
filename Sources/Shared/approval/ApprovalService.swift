@@ -39,7 +39,8 @@ public struct ApprovalService: Sendable {
 
     public func create(
         questions: [ApprovalQuestion],
-        now: Date = Date()
+        now: Date = Date(),
+        source: RemoteRequestSource? = nil
     ) async throws -> Approval {
         let normalizedQuestions = questions.map {
             ApprovalQuestion(
@@ -57,7 +58,8 @@ public struct ApprovalService: Sendable {
             status: .pending,
             createdAt: now,
             expiresAt: now.addingTimeInterval(timeout),
-            answeredAt: nil
+            answeredAt: nil,
+            source: source
         )
         try await repository.create(approval)
         return approval
@@ -80,8 +82,8 @@ public struct ApprovalService: Sendable {
         )
     }
 
-    public func createAndWait(questions: [ApprovalQuestion]) async throws -> Approval {
-        let approval = try await create(questions: questions)
+    public func createAndWait(questions: [ApprovalQuestion], source: RemoteRequestSource? = nil) async throws -> Approval {
+        let approval = try await create(questions: questions, source: source)
         do {
             return try await waitForResponse(id: approval.id)
         } catch is CancellationError {

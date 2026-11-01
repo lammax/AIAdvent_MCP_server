@@ -11,6 +11,7 @@ health_url="http://127.0.0.1:3010/health"
 public_origin="https://macbook-pro.tailab24a8.ts.net"
 approvals_url="${public_origin}/approvals"
 claude_url="${public_origin}/claude"
+codex_url="${public_origin}/codex"
 
 is_loaded() {
     launchctl print "${service_target}" >/dev/null 2>&1
@@ -51,6 +52,7 @@ start_remote() {
     /usr/bin/tr -d '\r\n' < "${token_path}" | /usr/bin/pbcopy
     echo "Remote approvals: ${approvals_url}"
     echo "Remote Claude: ${claude_url}"
+    echo "Remote Codex: ${codex_url}"
     echo "The login token was copied to the Mac clipboard for Universal Clipboard paste on iPhone."
     echo "Install the approvals page on the iPhone Home Screen before enabling notifications."
 }
@@ -60,6 +62,7 @@ status_remote() {
         echo "Remote is running and healthy."
         echo "Approvals: ${approvals_url}"
         echo "Claude tasks: ${claude_url}"
+        echo "Codex tasks: ${codex_url}"
         echo "Tailscale Serve terminates HTTPS; the local backend is ${health_url}."
         return 0
     fi
@@ -88,6 +91,17 @@ test_remote() {
     fi
     echo "Claude MCP registration 'remote' is connected."
 }
+
+if [[ "${2:-}" == "--agent" ]]; then
+    remote_agent="${3:-}"
+    case "$remote_agent" in codex|claude) ;; *) echo "Choose codex or claude." >&2; exit 64 ;; esac
+    case "${1:-}" in
+        start) start_remote ;;
+        stop|status) ;;
+        *) echo "Agent mode supports start, stop, status." >&2; exit 64 ;;
+    esac
+    exec "$HOME/Library/Application Support/Remote/bin/RemoteMCPServer" --agent-mode "$remote_agent" "$1"
+fi
 
 case "${1:-}" in
     start)

@@ -23,7 +23,7 @@ public actor RemoteClaudeJobService {
         startWorkerIfNeeded()
     }
 
-    public func submit(prompt: String, now: Date = Date()) async throws -> RemoteClaudeJob {
+    public func submit(prompt: String, now: Date = Date(), agent: String = "claude", project: String? = nil) async throws -> RemoteClaudeJob {
         let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedPrompt.isEmpty else { throw RemoteClaudeJobError.emptyPrompt }
         guard normalizedPrompt.count <= Self.maximumPromptLength else {
@@ -33,9 +33,10 @@ public actor RemoteClaudeJobService {
         let job = RemoteClaudeJob(
             id: UUID(),
             prompt: normalizedPrompt,
-            workingDirectory: workingDirectory,
+            workingDirectory: project ?? workingDirectory,
             status: .queued,
-            createdAt: now
+            createdAt: now,
+            agent: agent
         )
         try await repository.createClaudeJob(job)
         startWorkerIfNeeded()

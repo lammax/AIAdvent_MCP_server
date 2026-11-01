@@ -50,6 +50,7 @@ public struct ApprovalAnswer: Codable, Equatable, Sendable {
 }
 
 public struct Approval: Codable, Equatable, Sendable {
+    public let source: RemoteRequestSource?
     public let id: UUID
     public let questions: [ApprovalQuestion]
     public let status: ApprovalStatus
@@ -70,7 +71,8 @@ public struct Approval: Codable, Equatable, Sendable {
         status: ApprovalStatus,
         createdAt: Date,
         expiresAt: Date,
-        answeredAt: Date?
+        answeredAt: Date?,
+        source: RemoteRequestSource? = nil
     ) {
         self.id = id
         self.questions = questions
@@ -78,7 +80,25 @@ public struct Approval: Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.expiresAt = expiresAt
         self.answeredAt = answeredAt
+        self.source = source
     }
+}
+
+public struct RemoteRequestSource: Codable, Equatable, Sendable {
+    public let agent: String
+    public let project: String
+    public let chat: String?
+
+    public init(agent: String, project: String, chat: String? = nil) {
+        self.agent = agent
+        self.project = project
+        self.chat = chat
+    }
+}
+
+public struct RemoteAgentMode: Codable, Sendable {
+    public let agent: String
+    public let enabled: Bool
 }
 
 public enum ApprovalError: Error, Equatable, Sendable {

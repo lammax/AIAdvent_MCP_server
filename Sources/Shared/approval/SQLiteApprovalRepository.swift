@@ -43,6 +43,21 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             .path
     }
 
+    public func setRemoteMode(agent: String, enabled: Bool) async throws {
+        try await dbQueue.write { db in
+            try db.execute(sql: "INSERT INTO remote_agent_modes (agent, enabled) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET enabled = excluded.enabled",
+                           arguments: [agent, enabled])
+        }
+    }
+
+    public func remoteModes() async throws -> [RemoteAgentMode] {
+        try await dbQueue.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM remote_agent_modes ORDER BY agent").map {
+                RemoteAgentMode(agent: $0["agent"], enabled: $0["enabled"])
+            }
+        }
+    }
+
     public func create(_ approval: Approval) async throws {
         let optionsJSON = try Self.encodeOptions(approval.options)
         let responsesJSON = try Self.encodeOptions(approval.responses)
@@ -52,8 +67,8 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 sql: """
                 INSERT INTO approvals (
                     id, question, kind, options_json, status, response, responses_json, questions_json,
-                    created_at, expires_at, answered_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, expires_at, answered_at, source_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 arguments: [
                     approval.id.uuidString,
@@ -66,7 +81,8 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     questionsJSON,
                     approval.createdAt.timeIntervalSince1970,
                     approval.expiresAt.timeIntervalSince1970,
-                    approval.answeredAt?.timeIntervalSince1970
+                    approval.answeredAt?.timeIntervalSince1970,
+                    try approval.source.map(Self.encode)
                 ]
             )
             let eventID = UUID()
@@ -186,8 +202,8 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 sql: """
                 INSERT INTO remote_claude_jobs (
                     id, prompt, working_directory, status, response, error_message, session_id,
-                    created_at, started_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, started_at, completed_at, agent
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 arguments: [
                     job.id.uuidString,
@@ -200,6 +216,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     job.createdAt.timeIntervalSince1970,
                     job.startedAt?.timeIntervalSince1970,
                     job.completedAt?.timeIntervalSince1970,
+                    job.agent,
                 ]
             )
         }
@@ -228,11 +245,13 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
 
     public func requeueInterruptedClaudeJobs() async throws {
         try await dbQueue.write { db in
+            // A terminated task may already have changed files. Never replay it automatically.
+            try db.execute(sql: "UPDATE remote_claude_jobs SET status = 'failed', error_message = 'Interrupted by server restart; inspect changes before retrying.' WHERE status = 'running' AND agent = 'codex'")
             try db.execute(
                 sql: """
                 UPDATE remote_claude_jobs
                 SET status = ?, started_at = NULL
-                WHERE status = ?
+                WHERE status = ? AND agent = 'claude'
                 """,
                 arguments: [
                     RemoteClaudeJobStatus.queued.rawValue,
@@ -848,6 +867,18 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 table.uniqueKey(["event_id", "subscription_id"])
             }
         }
+        migrator.registerMigration("addRemoteAgentContext") { db in
+            try db.alter(table: "approvals") { table in
+                table.add(column: "source_json", .text)
+            }
+            try db.create(table: "remote_agent_modes") { table in
+                table.column("agent", .text).primaryKey()
+                table.column("enabled", .boolean).notNull()
+            }
+            try db.alter(table: "remote_claude_jobs") { table in
+                table.add(column: "agent", .text).notNull().defaults(to: "claude")
+            }
+        }
         return migrator
     }
 
@@ -908,7 +939,8 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             sessionID: row["session_id"],
             createdAt: Date(timeIntervalSince1970: row["created_at"]),
             startedAt: startedAt.map(Date.init(timeIntervalSince1970:)),
-            completedAt: completedAt.map(Date.init(timeIntervalSince1970:))
+            completedAt: completedAt.map(Date.init(timeIntervalSince1970:)),
+            agent: row["agent"]
         )
     }
 
@@ -946,7 +978,10 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             status: status,
             createdAt: Date(timeIntervalSince1970: row["created_at"]),
             expiresAt: Date(timeIntervalSince1970: row["expires_at"]),
-            answeredAt: answeredAtInterval.map(Date.init(timeIntervalSince1970:))
+            answeredAt: answeredAtInterval.map(Date.init(timeIntervalSince1970:)),
+            source: try (row["source_json"] as String?).map {
+                try decode(RemoteRequestSource.self, from: $0)
+            }
         )
     }
 
