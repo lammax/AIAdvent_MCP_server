@@ -6,6 +6,70 @@ import XCTVapor
 @testable import Shared
 
 final class RemoteTests: XCTestCase {
+    func testUsageParsersPreserveMissingValuesAndExcludeLocalAnalytics() throws {
+        let report = try RemoteCLIUsageReader.codexText(Data(#"{"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":300},"secondary":{"windowDurationMins":10080}},"rateLimitsByLimitId":{}}"#.utf8))
+        XCTAssertTrue(report.contains("осталось 100%"))
+        XCTAssertFalse(report.contains("7 дней"))
+        XCTAssertThrowsError(try RemoteCLIUsageReader.codexText(Data(#"{"rateLimits":null}"#.utf8)))
+        let claude = try RemoteCLIUsageReader.claudeText("Current session: 9% used · resets Nov 2 at 1:09pm (Europe/Moscow)\nCurrent week (all models): 27% used · resets Nov 7 at 8:59am (Europe/Moscow)\nTop skills: private local history")
+        XCTAssertTrue(claude.contains("осталось 91%"))
+        XCTAssertTrue(claude.contains("осталось 73%"))
+        XCTAssertFalse(claude.contains("private local history"))
+        XCTAssertThrowsError(try RemoteCLIUsageReader.claudeText("Not logged in"))
+    }
+
+    func testUsageReturnsPersistedAnswerWithoutQueueOrAgentMode() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let reader = TestUsageReader()
+        let usage = RemoteUsageService(reader: reader)
+        let app = try await Application.make(.testing)
+        configureApprovalHTTPRoutes(app: app, service: fixture.service,
+                                    authorization: ApprovalHTTPAuthorization(token: fixture.token),
+                                    agentRepository: fixture.repository, usage: usage)
+        defer { Task { try? await app.asyncShutdown() } }
+        let unauthorized = try await app.sendRequest(.POST, "/codex/usage")
+        XCTAssertEqual(unauthorized.status, .forbidden)
+        let initialCalls = await reader.calls
+        XCTAssertEqual(initialCalls, 0)
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        let first = try await app.sendRequest(.POST, "/codex/usage", headers: headers)
+        XCTAssertEqual(first.status, .ok)
+        let second = try await app.sendRequest(.POST, "/codex/usage", headers: headers)
+        XCTAssertEqual(second.status, .ok)
+        let firstJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(first.body.readableBytesView)) as? [String: Any])
+        let secondJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(second.body.readableBytesView)) as? [String: Any])
+        XCTAssertEqual(firstJSON["id"] as? String, secondJSON["id"] as? String)
+        XCTAssertEqual(firstJSON["createdAt"] as? String, secondJSON["createdAt"] as? String)
+        let calls = await reader.calls
+        XCTAssertEqual(calls, 1)
+        let jobs = try await fixture.repository.recentClaudeJobs(limit: 10)
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertTrue(jobs.allSatisfy { $0.status == .completed && $0.agent == "codex" && $0.response?.contains("fixture usage") == true })
+        let next = try await fixture.repository.claimNextClaudeJob(startedAt: Date())
+        XCTAssertNil(next)
+    }
+
+    func testUsageSnapshotInsertIsIdempotentUnderConcurrency() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let now = Date()
+        let snapshot = RemoteClaudeJob(id: UUID(), prompt: "Usage", workingDirectory: "",
+                                      status: .completed, response: "snapshot", createdAt: now, agent: "codex")
+        async let first = fixture.repository.saveUsageJobIfAbsent(snapshot)
+        async let second = fixture.repository.saveUsageJobIfAbsent(snapshot)
+        let results = try await (first, second)
+        XCTAssertEqual(results.0, results.1)
+        let jobs = try await fixture.repository.recentClaudeJobs(limit: 10)
+        XCTAssertEqual(jobs.count, 1)
+        let fresh = RemoteClaudeJob(id: UUID(), prompt: "Usage", workingDirectory: "",
+                                   status: .completed, response: "new snapshot", createdAt: now, agent: "codex")
+        _ = try await fixture.repository.saveUsageJobIfAbsent(fresh)
+        let refreshed = try await fixture.repository.recentClaudeJobs(limit: 10)
+        XCTAssertEqual(refreshed.count, 2)
+    }
+
     func testCodexInitializeAcceptsObjectExperimentalCapabilities() throws {
         let raw = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"codex","version":"test"},"capabilities":{"experimental":{"extension":{},"known":"value"},"roots":{"listChanged":true}}}}"#.utf8)
         let normalized = RemoteMCPTransport.normalizeInitialize(raw)
@@ -86,6 +150,11 @@ final class RemoteTests: XCTestCase {
         headers.bearerAuthorization = .init(token: fixture.token)
         let unauthorized = try await app.sendRequest(.GET, "/api/remote/projects")
         XCTAssertEqual(unauthorized.status, .unauthorized)
+        let codexPage = try await app.sendRequest(.GET, "/codex", headers: headers)
+        XCTAssertEqual(codexPage.status, .ok)
+        XCTAssertTrue(codexPage.body.string.contains(
+            "fetch('/codex/usage'"
+        ))
         headers.contentType = .json
         let body = byteBuffer(String(decoding: try JSONEncoder().encode(["prompt": "Test", "project": fixture.directory.path]), as: UTF8.self))
         let disabled = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: body)
@@ -723,6 +792,13 @@ final class RemoteTests: XCTestCase {
             page.body.getString(at: page.body.readerIndex, length: page.body.readableBytes)?
                 .contains("Send to Claude") == true
         )
+        XCTAssertTrue(page.body.string.contains(
+            "fetch('/claude/usage'"
+        ))
+        XCTAssertTrue(page.body.string.contains(
+            "appendJobOutput(article, job, 'job-prompt', job.prompt, 'prompt');"
+        ))
+        XCTAssertTrue(page.body.string.contains(".job-prompt.output-collapsed { max-height: 12em; }"))
 
         headers.contentType = .json
         let submitted = try await app.sendRequest(
@@ -1345,6 +1421,14 @@ final class RemoteTests: XCTestCase {
         var buffer = ByteBufferAllocator().buffer(capacity: string.utf8.count)
         buffer.writeString(string)
         return buffer
+    }
+}
+
+private actor TestUsageReader: RemoteUsageReading {
+    private(set) var calls = 0
+    func read(agent: String) async throws -> RemoteUsageReport {
+        calls += 1
+        return RemoteUsageReport(text: "fixture usage")
     }
 }
 

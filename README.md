@@ -33,6 +33,21 @@ is agent guidance, not an OS-level ban: `.git` write access permits Git state ch
 Results are persisted and displayed on `/codex`; these are new tasks, not continuations of a selected desktop chat.
 Interrupted Codex jobs are marked failed rather than replayed after restart.
 
+The **Usage** button on each agent page requests account limits and saves the answer
+in that page's task history, without navigating away or queuing a model task.
+Authenticated, CSRF-protected `POST /codex/usage` and `POST /claude/usage` use the
+installed CLIs' existing account authentication: Codex's local app-server
+`account/rateLimits/read`, and Claude's built-in `/usage` in print mode with tools,
+MCP servers, and settings hooks disabled for the query. Provider tokens are not
+read or copied by Remote. Replies show usage windows, remaining percentages, reset
+times and the collection timestamp; unknown values remain unavailable rather than
+being shown as zero. Concurrent reads are coalesced, snapshots are cached for 30
+seconds, and each query process has a 25-second deadline. Claude's unrelated local
+session/skill analytics are omitted from the stored report.
+Each cached snapshot has a stable report ID: repeated or concurrent clicks return
+the same stored answer instead of adding duplicate cards. The page shows only the
+newest Usage snapshot per agent, retaining earlier snapshots in the database.
+
 Install `CodexSkills/remote-mode` and `CodexSkills/remote-push` under `~/.codex/skills/`.
 The MCP configuration should allow a tool timeout exceeding Remote's 300-second wait (for example `tool_timeout_sec = 360`).
 For unattended question delivery, configure only `mcp_servers.remote.tools.ask_user.approval_mode = "approve"`.

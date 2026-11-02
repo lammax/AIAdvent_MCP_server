@@ -81,7 +81,10 @@ enum RemoteHTTPServer {
             claudeService: claudeService,
             push: pushContext,
             agentRepository: repository,
-            projects: projects
+            projects: projects,
+            usage: RemoteUsageService(reader: RemoteCLIUsageReader(
+                codexPath: codexPath, claudePath: configuration.claudeExecutablePath
+            ))
         )
 
         do {

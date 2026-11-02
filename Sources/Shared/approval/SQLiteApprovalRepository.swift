@@ -197,6 +197,17 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
     }
 
     public func createClaudeJob(_ job: RemoteClaudeJob) async throws {
+        try await insertClaudeJob(job, ifAbsent: false)
+    }
+
+    /// A cached usage snapshot has one UUID, including simultaneous/retried HTTP requests.
+    public func saveUsageJobIfAbsent(_ job: RemoteClaudeJob) async throws -> RemoteClaudeJob {
+        try await insertClaudeJob(job, ifAbsent: true)
+        guard let saved = try await claudeJob(id: job.id) else { throw ApprovalPersistenceError.corruptRecord }
+        return saved
+    }
+
+    private func insertClaudeJob(_ job: RemoteClaudeJob, ifAbsent: Bool) async throws {
         try await dbQueue.write { db in
             try db.execute(
                 sql: """
@@ -204,6 +215,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     id, prompt, working_directory, status, response, error_message, session_id,
                     created_at, started_at, completed_at, agent
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                \(ifAbsent ? "ON CONFLICT(id) DO NOTHING" : "")
                 """,
                 arguments: [
                     job.id.uuidString,

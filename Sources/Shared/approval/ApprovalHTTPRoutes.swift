@@ -142,7 +142,8 @@ public func configureApprovalHTTPRoutes(
     claudeService: RemoteClaudeJobService? = nil,
     push: RemotePushHTTPContext? = nil,
     agentRepository: SQLiteApprovalRepository? = nil,
-    projects: [RemoteProject] = []
+    projects: [RemoteProject] = [],
+    usage: RemoteUsageService? = nil
 ) {
     app.get { request in
         request.redirect(to: "/approvals")
@@ -150,6 +151,23 @@ public func configureApprovalHTTPRoutes(
 
     app.get("health") { _ in
         ApprovalHealthResponse(status: "ok")
+    }
+
+    for agent in ["codex", "claude"] {
+        app.post(.constant(agent), "usage") { request async throws -> RemoteClaudeJobResponse in
+            try requireMutationAuthorization(request, authorization: authorization)
+            guard let usage, let agentRepository else { throw Abort(.serviceUnavailable) }
+            let report: RemoteUsageReport
+            do { report = try await usage.report(agent: agent) }
+            catch { throw Abort(.serviceUnavailable, reason: RemoteUsageError.unavailable.localizedDescription) }
+            let now = Date()
+            let job = RemoteClaudeJob(
+                id: report.id, prompt: "Usage", workingDirectory: "", status: .completed,
+                response: report.text + "\nПроверено: " + ISO8601DateFormatter().string(from: report.fetchedAt),
+                createdAt: now, startedAt: now, completedAt: now, agent: agent
+            )
+            return RemoteClaudeJobResponse(try await agentRepository.saveUsageJobIfAbsent(job))
+        }
     }
 
     app.get("api", "remote", "modes") { request async throws -> [RemoteAgentMode] in
@@ -1000,7 +1018,7 @@ private enum ApprovalWebPage {
           <main class="shell">
             <header>
               <div><p class="eyebrow">Remote</p><h1>Claude</h1></div>
-              <nav><a class="secondary action-link" href="/approvals">Approvals</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="\(csrfToken)"><button class="secondary" type="submit">Sign out</button></form></nav>
+              <nav><a class="secondary action-link" href="/approvals">Approvals</a><button id="usage" class="secondary" type="button">Usage</button><form method="post" action="/logout"><input type="hidden" name="csrf" value="\(csrfToken)"><button class="secondary" type="submit">Sign out</button></form></nav>
             </header>
             <section class="card composer">
               <form id="prompt-form">
@@ -1019,6 +1037,29 @@ private enum ApprovalWebPage {
           const sendButton = document.getElementById('send');
           const composerMessage = document.getElementById('composer-message');
           const jobsState = document.getElementById('jobs');
+          const usageButton = document.getElementById('usage');
+          usageButton.addEventListener('click', async () => {
+            usageButton.disabled = true;
+            usageButton.textContent = 'Загрузка…';
+            composerMessage.textContent = 'Получаю лимиты Claude…';
+            try {
+              const response = await fetch('/claude/usage', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'X-CSRF-Token': csrfToken }
+              });
+              if (response.status === 401) { window.location = '/login'; return; }
+              if (!response.ok) throw new Error();
+              renderedJobs = null;
+              await loadJobs();
+              composerMessage.textContent = 'Лимиты получены. Отчёт — ниже.';
+              jobsState.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } catch (_) {
+              composerMessage.textContent = 'Не удалось получить лимиты. Проверьте вход в CLI на Mac и повторите запрос.';
+            } finally {
+              usageButton.disabled = false;
+              usageButton.textContent = 'Usage';
+            }
+          });
           let submittingPrompt = false;
           let renderedJobs = null;
           const expandedJobOutputs = new Set();
@@ -1047,7 +1088,15 @@ private enum ApprovalWebPage {
               if (response.status === 401) { window.location = '/login'; return; }
               if (!response.ok) throw new Error('Request failed');
               const payload = await response.json();
-              const jobs = payload.jobs || [];
+              // Usage is current account state: display only the newest snapshot per agent.
+              const seenUsage = new Set();
+              const jobs = (payload.jobs || []).filter(job => {
+                if (job.prompt !== 'Usage' || job.workingDirectory !== '') return true;
+                const key = job.agent;
+                if (seenUsage.has(key)) return false;
+                seenUsage.add(key);
+                return true;
+              });
               const signature = JSON.stringify(jobs);
               if (signature === renderedJobs) return;
               renderedJobs = signature;
@@ -1059,27 +1108,28 @@ private enum ApprovalWebPage {
             }
           }
 
-          function appendJobOutput(article, job, className, text) {
-            const output = node('pre', className, text);
+          function appendJobOutput(article, job, className, text, kind = 'output') {
+            const stateKey = kind === 'output' ? job.id : job.id + '-' + kind;
+            const output = node(kind === 'prompt' ? 'h2' : 'pre', className, text);
             const toggle = node('button', 'secondary output-toggle');
             toggle.type = 'button';
-            output.id = 'job-output-' + job.id;
+            output.id = 'job-' + kind + '-' + job.id;
             toggle.setAttribute('aria-controls', output.id);
             output.updateDisclosure = () => {
-              const expanded = expandedJobOutputs.has(job.id);
+              const expanded = expandedJobOutputs.has(stateKey);
               output.classList.toggle('output-collapsed', !expanded);
               toggle.hidden = !expanded && output.scrollHeight <= output.clientHeight + 1;
               toggle.textContent = expanded ? 'Свернуть' : 'Развернуть';
               toggle.setAttribute('aria-expanded', String(expanded));
             };
             toggle.addEventListener('click', () => {
-              if (expandedJobOutputs.has(job.id)) expandedJobOutputs.delete(job.id);
-              else expandedJobOutputs.add(job.id);
+              if (expandedJobOutputs.has(stateKey)) expandedJobOutputs.delete(stateKey);
+              else expandedJobOutputs.add(stateKey);
               try { sessionStorage.setItem('remote-expanded-outputs', JSON.stringify([...expandedJobOutputs])); } catch (_) {}
               output.updateDisclosure();
             });
             toggle.hidden = true;
-            output.classList.toggle('output-collapsed', !expandedJobOutputs.has(job.id));
+            output.classList.toggle('output-collapsed', !expandedJobOutputs.has(stateKey));
             article.append(output, toggle);
             outputObserver.observe(output);
           }
@@ -1100,7 +1150,8 @@ private enum ApprovalWebPage {
                 node('span', `status status-${job.status}`, job.status),
                 node('time', 'muted', formatDate(job.createdAt))
               );
-              article.append(heading, node('h2', 'job-prompt', job.prompt));
+              article.append(heading);
+              appendJobOutput(article, job, 'job-prompt', job.prompt, 'prompt');
               if (job.status === 'queued') {
                 article.append(node('p', 'muted', 'Waiting for the local Claude worker…'));
               } else if (job.status === 'running') {
@@ -1171,8 +1222,8 @@ private enum ApprovalWebPage {
                 const promptInput = document.getElementById('prompt');
                 """)
             .replacingOccurrences(of: "JSON.stringify({ prompt })", with: "JSON.stringify({ prompt, project: projectInput.value })")
-            .replacingOccurrences(of: "article.append(heading, node('h2', 'job-prompt', job.prompt));",
-                                  with: "article.append(heading, node('p', 'muted', job.workingDirectory), node('h2', 'job-prompt', job.prompt));")
+            .replacingOccurrences(of: "article.append(heading);",
+                                  with: "article.append(heading, node('p', 'muted', job.workingDirectory));")
     }
 
     private static let sharedStyles = """
@@ -1228,6 +1279,7 @@ private enum ApprovalWebPage {
     .job-response { background: #ecfdf5; color: #064e3b; }
     .job-error { background: #fef2f2; color: #991b1b; }
     .output-collapsed { max-height: calc(12em + 28px); overflow: hidden; }
+    .job-prompt.output-collapsed { max-height: 12em; }
     button.output-toggle { margin-top: 10px; }
     @media (prefers-color-scheme: dark) {
       body { background: #0f172a; color: #f8fafc; }

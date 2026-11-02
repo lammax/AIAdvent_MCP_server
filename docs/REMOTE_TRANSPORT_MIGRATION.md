@@ -26,14 +26,23 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Browser protection | **Implemented baseline** | HMAC-derived Secure/HttpOnly/SameSite session cookie, CSRF token, Origin validation, no-store pages, and security headers |
 | Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
 | Independent agent modes and request context | **Implemented; iPhone verification pending** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive |
+| Switch agent mode by incoming message channel | **Planned** | A user message in the desktop chat disables that agent's Remote mode; an authenticated message submitted through the web enables it. Change only when needed, before handling the message; keep the shared HTTP service and running jobs alive. Reliable desktop message-source detection still needs investigation. |
 | Codex tasks in existing projects | **Implemented; basic live check passed** | Separate `/codex` page, eight registered projects, workspace-write sandbox, persistent job results; live task returned `REMOTE_CODEX_OK`; desktop chat continuation is not implemented |
+| Claude and Codex usage reports | **Implemented; iPhone verification pending** | Usage returns an answer in Remote's task history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. Snapshots retain their collection timestamp, with a 30-second cache and a 25-second subprocess deadline. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
 | Alternate ingress path | **Planned** | No Headscale, alternate overlay, reverse HTTPS tunnel, or managed access proxy is configured |
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-The current Remote test suite contains 39 passing tests. Production HTTPS, PWA installation, push delivery, restart persistence, LTE/Wi-Fi access, and iPhone approval responses have also been exercised manually for the original Claude flow. Codex routing and new project controls need their own iPhone acceptance check.
+The current Remote test suite contains 42 passing tests. Production HTTPS, PWA installation, push delivery, restart persistence, LTE/Wi-Fi access, and iPhone approval responses have also been exercised manually for the original Claude flow. Codex routing and new project controls need their own iPhone acceptance check.
+
+For the planned channel-based mode switch, only a new user message changes mode;
+page views, polling, push receipts, tool output, and background task progress must not
+change it. Mode remains independent per agent, and explicit start/stop commands take
+precedence over channel defaults. Web submission must enable mode before the current
+disabled-mode guard rejects the request. Test duplicate messages, switching while a
+task is running, and independent Claude/Codex modes before enabling this behavior.
 
 ## Important origin constraint
 
