@@ -1112,7 +1112,11 @@ private enum ApprovalWebPage {
           const chatSummary = document.getElementById('chat-summary');
           const refreshChat = document.getElementById('refresh-chat');
           let selectedChat = null;
+          let pendingLatestChat = null;
           let chatRequest = 0;
+          let conversationTimer = null;
+          let conversationPollInFlight = false;
+          const refreshChatLabel = refreshChat.textContent;
           const sendButton = document.getElementById('send');
           const composerMessage = document.getElementById('composer-message');
           const jobsState = document.getElementById('jobs');
@@ -1146,16 +1150,49 @@ private enum ApprovalWebPage {
             sendButton.disabled = submittingPrompt || !projectInput.value ||
               (conversationInput.value === 'latest' && !selectedChat);
           }
-          async function loadConversation() {
-            const sequence = ++chatRequest;
-            selectedChat = null;
+          function describeChat(chat) {
+            return chat.title + ' · ' + new Date(chat.updatedAt * 1000).toLocaleString() +
+              ' · ' + chat.id.slice(0, 8) +
+              (chat.busy ? ' · Чат открыт другим клиентом, запрос будет ждать.' : '');
+          }
+          function selectChat(chat) {
+            selectedChat = chat;
+            pendingLatestChat = null;
+            refreshChat.textContent = refreshChatLabel;
+            chatSummary.textContent = chat
+              ? describeChat(chat)
+              : 'Рабочих чатов нет. Выберите «Новый чат».';
             updateSendState();
-            if (!projectInput.value) { chatSummary.textContent = 'Выберите проект.'; return; }
-            if (conversationInput.value === 'new') {
-              chatSummary.textContent = 'Будет создан новый чат без истории другого чата.';
+          }
+          async function loadConversation(options = {}) {
+            const silent = options.silent === true;
+            const allowDraftSwitch = options.allowDraftSwitch !== false;
+            const sequence = ++chatRequest;
+            if (!projectInput.value) {
+              if (!silent) {
+                selectedChat = null;
+                pendingLatestChat = null;
+                refreshChat.textContent = refreshChatLabel;
+                chatSummary.textContent = 'Выберите проект.';
+                updateSendState();
+              }
               return;
             }
-            chatSummary.textContent = 'Ищу последний рабочий чат…';
+            if (conversationInput.value === 'new') {
+              selectedChat = null;
+              pendingLatestChat = null;
+              refreshChat.textContent = refreshChatLabel;
+              if (!silent) chatSummary.textContent = 'Будет создан новый чат без истории другого чата.';
+              updateSendState();
+              return;
+            }
+            if (!silent) {
+              selectedChat = null;
+              pendingLatestChat = null;
+              refreshChat.textContent = refreshChatLabel;
+              chatSummary.textContent = 'Ищу последний рабочий чат…';
+              updateSendState();
+            }
             try {
               const agent = window.location.pathname.split('/')[1];
               const query = new URLSearchParams({agent, project:projectInput.value});
@@ -1165,19 +1202,50 @@ private enum ApprovalWebPage {
               const chats = await response.json();
               if (sequence !== chatRequest) return;
               const requestedSession = projectInput.selectedOptions[0]?.dataset.sessionId;
-              selectedChat = (requestedSession ? chats.find(chat => chat.id === requestedSession) : chats[0]) || null;
-              chatSummary.textContent = selectedChat
-                ? selectedChat.title + ' · ' + new Date(selectedChat.updatedAt * 1000).toLocaleString() +
-                  ' · ' + selectedChat.id.slice(0, 8) + (selectedChat.busy ? ' · Чат открыт другим клиентом, запрос будет ждать.' : '')
-                : 'Рабочих чатов нет. Выберите «Новый чат».';
+              const latest = ((!silent && requestedSession)
+                ? chats.find(chat => chat.id === requestedSession)
+                : chats[0]) || null;
+              const hasDraft = promptInput.value.trim().length > 0 || submittingPrompt;
+              if (silent && latest && selectedChat && latest.id !== selectedChat.id &&
+                  !allowDraftSwitch && hasDraft) {
+                pendingLatestChat = latest;
+                refreshChat.textContent = 'Переключиться на новый чат';
+                chatSummary.textContent = describeChat(selectedChat) +
+                  ' · Новый чат доступен: ' + latest.title + ' · ' + latest.id.slice(0, 8);
+                return;
+              }
+              selectChat(latest);
             } catch (_) {
-              if (sequence === chatRequest) chatSummary.textContent = 'Не удалось получить чаты. Повторите обновление или явно выберите новый чат.';
+              if (sequence === chatRequest && !silent) {
+                chatSummary.textContent = 'Не удалось получить чаты. Повторите обновление или явно выберите новый чат.';
+              }
             }
             if (sequence === chatRequest) updateSendState();
           }
-          projectInput.addEventListener('change', loadConversation);
-          conversationInput.addEventListener('change', loadConversation);
-          refreshChat.addEventListener('click', loadConversation);
+          async function pollLatestConversation() {
+            if (conversationPollInFlight || document.visibilityState !== 'visible' ||
+                !projectInput.value || conversationInput.value !== 'latest') return;
+            conversationPollInFlight = true;
+            try {
+              await loadConversation({silent:true, allowDraftSwitch:false});
+            } finally {
+              conversationPollInFlight = false;
+            }
+          }
+          function startConversationPolling() {
+            if (conversationTimer !== null) window.clearInterval(conversationTimer);
+            conversationTimer = null;
+            if (document.visibilityState !== 'visible') return;
+            conversationTimer = window.setInterval(pollLatestConversation, 4000);
+            pollLatestConversation();
+          }
+          document.addEventListener('visibilitychange', startConversationPolling);
+          projectInput.addEventListener('change', () => loadConversation());
+          conversationInput.addEventListener('change', () => loadConversation());
+          refreshChat.addEventListener('click', () => {
+            if (pendingLatestChat) selectChat(pendingLatestChat);
+            else loadConversation({allowDraftSwitch:true});
+          });
           updateSendState();
           const projectsAgent = window.location.pathname.split('/')[1];
           fetch('/api/remote/projects?' + new URLSearchParams({agent:projectsAgent}), {credentials:'same-origin'})
@@ -1188,6 +1256,7 @@ private enum ApprovalWebPage {
               projectInput.add(option);
             }))
             .catch(() => { chatSummary.textContent = 'Unable to load registered projects.'; });
+          startConversationPolling();
           let renderedJobs = null;
           const expandedJobOutputs = new Set();
           try {

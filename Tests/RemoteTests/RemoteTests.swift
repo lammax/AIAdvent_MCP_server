@@ -730,6 +730,10 @@ final class RemoteTests: XCTestCase {
         headers.bearerAuthorization = .init(token: fixture.token)
         let page = try await app.sendRequest(.GET, "/codex", headers: headers)
         XCTAssertTrue(page.body.string.contains("id=\"clear-history\""))
+        XCTAssertTrue(page.body.string.contains("window.setInterval(pollLatestConversation, 4000)"))
+        XCTAssertTrue(page.body.string.contains("document.addEventListener('visibilitychange'"))
+        XCTAssertTrue(page.body.string.contains("Переключиться на новый чат"))
+        XCTAssertTrue(page.body.string.contains("Новый чат доступен"))
 
         let cleared = try await app.sendRequest(.DELETE, "/codex/jobs", headers: headers)
         XCTAssertEqual(cleared.status, .ok)
