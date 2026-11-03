@@ -76,6 +76,37 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(Set(result.map(\.id)), [normal, known])
     }
 
+    func testCodexRemotePromptIsCompactAndKeepsOperationalContracts() {
+        let id = UUID()
+        let sessionID = UUID().uuidString
+        let project = "/registered/project"
+        let request = "тест связи"
+        let job = RemoteClaudeJob(
+            id: id, prompt: request, workingDirectory: project, status: .running,
+            sessionID: sessionID, createdAt: Date(), agent: "codex"
+        )
+
+        let prompt = RemoteAgentRunner.codexPrompt(job: job, directory: project)
+
+        XCTAssertTrue(prompt.contains("Remote task ID: \(id.uuidString)"))
+        XCTAssertTrue(prompt.contains("project=\"\(project)\""))
+        XCTAssertTrue(prompt.contains("chat=\"\(sessionID)\""))
+        XCTAssertTrue(prompt.contains("REMOTE_MESSAGE_CHANNEL=web"))
+        XCTAssertTrue(prompt.contains("mcp__remote__ask_user"))
+        XCTAssertTrue(prompt.contains("Web Push"))
+        XCTAssertTrue(prompt.contains("Put the result in final"))
+        XCTAssertTrue(prompt.contains("commit only if explicitly asked"))
+        XCTAssertTrue(prompt.contains("no force-push"))
+        XCTAssertTrue(prompt.hasSuffix(request))
+        XCTAssertLessThan(prompt.count - request.count, 700)
+
+        let newChat = RemoteClaudeJob(
+            id: UUID(), prompt: request, workingDirectory: project, status: .running,
+            createdAt: Date(), agent: "codex"
+        )
+        XCTAssertTrue(RemoteAgentRunner.codexPrompt(job: newChat, directory: project).contains("chat=\"new\""))
+    }
+
     func testCodexCatalogReadsHistorySizeAndExcludesRetiredConversation() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }

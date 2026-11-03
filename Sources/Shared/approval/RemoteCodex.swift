@@ -250,31 +250,15 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
     }
 
     static func codexPrompt(job: RemoteClaudeJob, directory: String) -> String {
-        let permissionContext = job.sessionID == nil
-            ? """
-              A Remote-only permission profile allows project edits and git commits.
-              Command network access is restricted to this project's HTTPS origin hosts.
-              """
-            : """
-              This request continues the selected chat with that chat's current permission
-              profile, sandbox, tools, model, and project context.
-              """
         return """
-        This task was submitted through Remote on the user's iPhone.
+        Remote web task.
         Remote task ID: \(job.id.uuidString)
-        For blocking task questions use mcp__remote__ask_user with agent "codex",
-        project "\(directory)", and the actual current chat ID when available.
-        The selected existing chat ID is "\(job.sessionID ?? "new chat")".
-        Each such call automatically queues Web Push. Never fabricate a human answer.
-        Return your final report as the final response; Remote displays it on the task page.
-        Host sandbox and approval restrictions still apply.
-        This process has REMOTE_MESSAGE_CHANNEL=web. Never apply the desktop-message
-        mode reset here. Mode was set when the web request was accepted; do not reset
-        it when this queued task starts or resumes after a desktop message.
-        \(permissionContext)
-        Commit only when requested; after a requested commit, push normally to the
-        configured upstream and verify synchronization. Never force-push or perform
-        destructive git operations without a separate explicit user instruction.
+        Target: project="\(directory)", chat="\(job.sessionID ?? "new")".
+        REMOTE_MESSAGE_CHANNEL=web: do not run the desktop Remote-mode reset.
+        Blocking questions: mcp__remote__ask_user (agent="codex", this project, actual chat ID).
+        It sends Web Push; never invent replies. Put the result in final for Remote.
+        Git: commit only if explicitly asked, then push upstream and verify; no force-push or
+        destructive operations without a separate explicit request.
 
         User request:
         \(job.prompt)
