@@ -27,7 +27,7 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
 | Independent agent modes and request context | **Implemented; basic iPhone flow verified** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive. The full multi-agent stop/restart matrix remains to be checked. |
 | Switch agent mode by incoming message channel | **Implemented; desktop via agent instructions** | Valid web task submission and its agent mode are stored atomically. Desktop global rules/skills call an idempotent per-agent helper before handling a real user message. Explicit commands take priority; web workers carry a channel marker and cannot undo a later desktop switch. No unconditional native hook is installed; existing clients must load the updated rules. |
-| Codex tasks in existing projects | **Implemented; iPhone tasks and Git flow verified** | Separate `/codex` page, registered projects and persisted results. A Remote-only permission profile permits project Git writes and HTTPS origin access. BrainApp's Clock Gap commit/push completed through the web. Existing desktop chat continuation is not implemented. |
+| Codex tasks in existing projects | **Implemented and installed; iPhone E2E pending** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. New chats use the Remote-only permission profile. Existing chats use Codex's supported queue command and retain that chat's context and permissions. |
 | Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
 | Signed deployment | **Implemented; restart verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses installation while jobs are active. Documents permission survived reinstall; unattended self-update from a web job is not implemented. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
@@ -37,8 +37,8 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-Updated 3 November 2026. The last committed baseline is `4f308a6` (`Usage upd`);
-channel switching and latest-chat continuation are installed from the current uncommitted worktree. The current Remote test suite contains 53 passing
+Updated 3 November 2026. Agent-aware channel switching, latest-chat selection and
+existing-chat queue delivery are committed and installed. The current Remote test suite contains 54 passing
 tests. The installed HTTP server was built with native SwiftPM in debug configuration;
 a release build of this latest baseline remains a separate validation item.
 Local health, bundled assets and SQLite checks passed. iPhone usage reports,
@@ -48,7 +48,7 @@ acceptance coverage remains incomplete.
 
 ## Remaining product work
 
-### Implemented: continue the latest working chat in a selected project
+### Implemented and installed: continue the latest working chat in a selected project
 
 - Both pages default to the latest working chat by activity, scoped by provider
   and canonical registered project, excluding archived, diagnostic and subagent chats.
@@ -57,15 +57,19 @@ acceptance coverage remains incomplete.
   for explicit new chats.
 - The form shows its title/date/ID before sending and pins that ID in SQLite;
   an explicit new-chat option remains. Missing targets fail without a silent fork.
-- Native Codex `exec resume` and closed-chat Claude `--resume` preserve provider
-  history. An open Cursor chat receives the request through Claude Code's supported
+- Existing Codex chats use `codex queue --thread … --message … --resume`, which
+  appends without competing for the desktop rollout writer and lets a managed daemon
+  resume an unloaded thread. New Codex chats still use native `exec`. Closed Claude
+  chats use `--resume`, preserving provider history. An open Cursor chat receives the request through Claude Code's supported
   cross-session `SendMessage`; Remote reads its next non-empty final `end_turn`
   through the public Agent SDK and returns it to the iPhone task page.
 - Busy jobs retain their target and retry after five seconds without blocking
   other ready jobs. An open but `idle` Cursor chat is available to Remote; only an
-  owner reporting `busy` waits. Codex uses its native writer lock at launch because
-  app-server `active` also means a chat is merely loaded. Claude ownership is checked
-  before delivery. The open-Cursor response collector has a 30-minute deadline.
+  owner reporting `busy` waits. Claude ownership is checked before delivery. Codex
+  results are matched to a unique Remote task marker through read-only app-server
+  history. A durable SQLite enqueue receipt prevents a server restart from sending
+  the same message again; a crash before that receipt fails closed. Both response
+  collectors have a 30-minute deadline.
 - Claude web jobs explicitly state that Remote was enabled atomically at acceptance,
   preventing resumed chat context from reporting an obsolete disabled state or
   applying the desktop channel reset inside `REMOTE_MESSAGE_CHANNEL=web`.
@@ -81,27 +85,32 @@ acceptance coverage remains incomplete.
 - The signed installer replaces resource bundles as a unit, preventing stale
   Contents/Resources assets from shadowing a newer native SwiftPM flat bundle.
 
-1. **Task visibility and recovery.** Stream progress into web task cards; distinguish
+1. **Accept Codex queued continuation on the iPhone.** The signed HTTP server is
+   installed and healthy. Run an end-to-end iPhone-to-open-chat test and verify that
+   the message appears once in Codex Desktop and its answer returns to the same Remote
+   card. Automated coverage already verifies that a server restart after enqueue
+   resumes collection without replay.
+2. **Task visibility and recovery.** Stream progress into web task cards; distinguish
    running, waiting for a human, blocked by permissions, cancelled and interrupted.
    Add a controlled stop action and document queue behavior.
-2. **Controlled server updates.** A web job cannot replace its own host server:
+3. **Controlled server updates.** A web job cannot replace its own host server:
    its sandbox forbids the Remote runtime directory and the installer rejects active
    jobs. Design a separate, explicitly authorized update path that drains the queue,
    preserves signing and supports rollback without granting broad writes to agents.
-3. **Desktop lifecycle verification.** Channel switching is implemented with an
+4. **Desktop lifecycle verification.** Channel switching is implemented with an
    authoritative HTTP entrypoint and instruction-driven desktop preflight. Verify
    updated instructions in all existing Claude/Cursor chats. A deterministic native
    desktop callback remains a future improvement; do not attach a blanket
    `UserPromptSubmit` mode-reset hook to synthetic/background events.
-4. **Chat selection and new projects.** Add a picker for any existing chat beyond
+5. **Chat selection and new projects.** Add a picker for any existing chat beyond
    the implemented latest-chat continuation. Separately support creating a project
    under an allowlisted parent directory.
-5. **Long-running approvals.** Investigate asynchronous resumption after the current
+6. **Long-running approvals.** Investigate asynchronous resumption after the current
    wait expires, including restart/recovery; do not simply lengthen the timeout
    without confirming client behavior.
-6. **Security hardening.** Follow the deferred track below, starting with Claude's
+7. **Security hardening.** Follow the deferred track below, starting with Claude's
    permission bypass and per-device sessions. Complete the gate before public/shared ingress.
-7. **Transport independence.** Finish application/ingress diagnostics, then test an
+8. **Transport independence.** Finish application/ingress diagnostics, then test an
    alternate path, stable origin and any carrier-restriction fallback in staging.
 
 For channel-based mode switching, only a new direct user message changes mode;

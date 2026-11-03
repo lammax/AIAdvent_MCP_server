@@ -56,12 +56,16 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
     public let codexPath: String
     public let projects: [RemoteProject]
     public let conversations: RemoteConversationCatalog?
+    public let repository: (any RemoteClaudeJobRepository)?
 
-    public init(claude: ClaudeCLIRunner, codexPath: String, projects: [RemoteProject], conversations: RemoteConversationCatalog? = nil) {
+    public init(claude: ClaudeCLIRunner, codexPath: String, projects: [RemoteProject],
+                conversations: RemoteConversationCatalog? = nil,
+                repository: (any RemoteClaudeJobRepository)? = nil) {
         self.claude = claude
         self.codexPath = codexPath
         self.projects = projects
         self.conversations = conversations
+        self.repository = repository
     }
 
     public func run(job: RemoteClaudeJob) async throws -> RemoteClaudeJobResult {
@@ -83,6 +87,14 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
         }
         guard job.agent == "codex" else { throw RemoteClaudeJobError.processFailed("Unknown agent.") }
         let directory = try RemoteProject.resolve(job.workingDirectory, in: projects)
+        let prompt = Self.codexPrompt(job: job, directory: directory)
+        if job.sessionID != nil {
+            guard let repository else { throw RemoteConversationError.unavailable }
+            return try await RemoteCodexQueueRunner(
+                codexPath: codexPath,
+                repository: repository
+            ).run(job: job, directory: directory, prompt: prompt)
+        }
         return try await Task.detached {
             let outputDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("remote-codex-\(UUID())")
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: false,
@@ -119,29 +131,8 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 "-c", "mcp_servers.remote.required=true"
                 ]
                 + (job.sessionID.map { ["resume", $0] } ?? ["--thread-source", "remote"])
-                + [
-                "--skip-git-repo-check", "--json", "--output-last-message", outputURL.path,
-                "--", """
-                This task was submitted through Remote on the user's iPhone.
-                For blocking task questions use mcp__remote__ask_user with agent "codex",
-                project "\(directory)", and the actual current chat ID when available.
-                The selected existing chat ID is "\(job.sessionID ?? "new chat")".
-                Each such call automatically queues Web Push. Never fabricate a human answer.
-                Return your final report as the final response; Remote displays it on the task page.
-                Host sandbox and approval restrictions still apply.
-                This process has REMOTE_MESSAGE_CHANNEL=web. Never apply the desktop-message
-                mode reset here. Mode was set when the web request was accepted; do not reset
-                it when this queued task starts or resumes after a desktop message.
-                A Remote-only permission profile allows project edits and git commits.
-                Command network access is restricted to this project's HTTPS origin hosts.
-                Commit only when requested; after a requested commit, push normally to the
-                configured upstream and verify synchronization. Never force-push or perform
-                destructive git operations without a separate explicit user instruction.
-
-                User request:
-                \(job.prompt)
-                """
-            ]
+                + ["--skip-git-repo-check", "--json", "--output-last-message", outputURL.path,
+                   "--", prompt]
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
@@ -184,5 +175,37 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             guard let actualSessionID else { throw RemoteConversationError.unavailable }
             return RemoteClaudeJobResult(response: String(result.prefix(200_000)), sessionID: actualSessionID)
         }.value
+    }
+
+    static func codexPrompt(job: RemoteClaudeJob, directory: String) -> String {
+        let permissionContext = job.sessionID == nil
+            ? """
+              A Remote-only permission profile allows project edits and git commits.
+              Command network access is restricted to this project's HTTPS origin hosts.
+              """
+            : """
+              This request continues the selected chat with that chat's current permission
+              profile, sandbox, tools, model, and project context.
+              """
+        return """
+        This task was submitted through Remote on the user's iPhone.
+        Remote task ID: \(job.id.uuidString)
+        For blocking task questions use mcp__remote__ask_user with agent "codex",
+        project "\(directory)", and the actual current chat ID when available.
+        The selected existing chat ID is "\(job.sessionID ?? "new chat")".
+        Each such call automatically queues Web Push. Never fabricate a human answer.
+        Return your final report as the final response; Remote displays it on the task page.
+        Host sandbox and approval restrictions still apply.
+        This process has REMOTE_MESSAGE_CHANNEL=web. Never apply the desktop-message
+        mode reset here. Mode was set when the web request was accepted; do not reset
+        it when this queued task starts or resumes after a desktop message.
+        \(permissionContext)
+        Commit only when requested; after a requested commit, push normally to the
+        configured upstream and verify synchronization. Never force-push or perform
+        destructive git operations without a separate explicit user instruction.
+
+        User request:
+        \(job.prompt)
+        """
     }
 }

@@ -33,7 +33,8 @@ enum RemoteHTTPServer {
                 claude: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
                 codexPath: codexPath,
                 projects: projects,
-                conversations: conversations
+                conversations: conversations,
+                repository: repository
             ),
             workingDirectory: configuration.claudeWorkingDirectory
         )

@@ -135,36 +135,85 @@ final class RemoteTests: XCTestCase {
         defer { fixture.remove() }
         let path = fixture.directory.resolvingSymlinksInPath().path
         let id = UUID().uuidString
-        let script = fixture.directory.appendingPathComponent("resume-probe")
+        let script = fixture.directory.appendingPathComponent("queue-probe")
+        let queueCount = fixture.directory.appendingPathComponent("queue-count")
+        let jobID = UUID()
         try """
         #!/bin/sh
-        resumed=no
-        while [ "$#" -gt 0 ]; do
-          if [ "$1" = "resume" ]; then shift; [ "$1" = "\(id)" ] || exit 9; resumed=yes; fi
-          if [ "$1" = "--output-last-message" ]; then shift; output="$1"; fi
-          shift
-        done
-        [ "$resumed" = yes ] || exit 8
-        printf '%s' 'Retained' > "$output"
-        printf '{"type":"thread.started","thread_id":"\(id)"}\\n'
+        case "$1" in
+          queue)
+            printf x >> "\(queueCount.path)"
+            exit 0
+            ;;
+          app-server)
+            count=0
+            while IFS= read -r line; do
+              count=$((count + 1))
+              case "$count" in
+                1)
+                  printf '%s\\n' '{"id":1,"result":{}}'
+                  ;;
+                3)
+                  printf '%s\\n' '{"id":2,"result":{"thread":{"id":"\(id)","turns":[{"id":"turn","status":"completed","items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]},{"id":"agent","type":"agentMessage","text":"Retained"}]}]}}}'
+                  ;;
+              esac
+            done
+            exit 0
+            ;;
+        esac
+        exit 8
         """.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         let project = RemoteProject(name: "Test", path: path)
-        let job = RemoteClaudeJob(id: UUID(), prompt: "Continue", workingDirectory: path,
+        let job = RemoteClaudeJob(id: jobID, prompt: "Continue", workingDirectory: path,
                                  status: .running, sessionID: id, createdAt: Date(), agent: "codex")
-        for busy in [false, true] {
-            let catalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [
-                .init(id: id, title: "Existing", project: path, updatedAt: 1, busy: busy)
-            ]), repository: fixture.repository, projects: [project])
-            let runner = RemoteAgentRunner(claude: ClaudeCLIRunner(executablePath: script.path), codexPath: script.path,
-                                           projects: [project], conversations: catalog)
-            do {
-                let result = try await runner.run(job: job)
-                XCTAssertFalse(busy)
-                XCTAssertEqual(result.sessionID, id)
-                XCTAssertEqual(result.response, "Retained")
-            } catch RemoteConversationError.busy { XCTAssertTrue(busy) }
-        }
+        let result = try await RemoteCodexQueueRunner(
+            codexPath: script.path, repository: fixture.repository,
+            timeout: 5, pollInterval: 0.01
+        ).run(job: job, directory: path, prompt: RemoteAgentRunner.codexPrompt(job: job, directory: path))
+        XCTAssertEqual(result.sessionID, id)
+        XCTAssertEqual(result.response, "Retained")
+        XCTAssertEqual(try String(contentsOf: queueCount, encoding: .utf8), "x")
+
+        let catalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [
+            .init(id: id, title: "Existing", project: path, updatedAt: 1, busy: true)
+        ]), repository: fixture.repository, projects: [project])
+        let runner = RemoteAgentRunner(claude: ClaudeCLIRunner(executablePath: script.path), codexPath: script.path,
+                                       projects: [project], conversations: catalog, repository: fixture.repository)
+        do {
+            _ = try await runner.run(job: job)
+            XCTFail("Busy owner must defer")
+        } catch RemoteConversationError.busy {}
+    }
+
+    func testDispatchedCodexJobResumesCollectionAfterRestartWithoutReplay() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let now = Date()
+        let dispatched = RemoteClaudeJob(
+            id: UUID(), prompt: "Queued", workingDirectory: fixture.directory.path,
+            status: .queued, sessionID: UUID().uuidString, createdAt: now, agent: "codex"
+        )
+        try await fixture.repository.createClaudeJob(dispatched)
+        _ = try await fixture.repository.claimNextClaudeJob(startedAt: now)
+        try await fixture.repository.markCodexMessageQueued(id: dispatched.id, at: now)
+        try await fixture.repository.requeueInterruptedClaudeJobs()
+        let resumed = try await fixture.repository.claimNextClaudeJob(startedAt: now.addingTimeInterval(1))
+        XCTAssertEqual(resumed?.id, dispatched.id)
+        XCTAssertNotNil(resumed?.messageQueuedAt)
+
+        try await fixture.repository.failClaudeJob(
+            id: dispatched.id, message: "test cleanup", completedAt: now.addingTimeInterval(1)
+        )
+        let unsafe = RemoteClaudeJob(
+            id: UUID(), prompt: "Legacy exec", workingDirectory: fixture.directory.path,
+            status: .queued, sessionID: UUID().uuidString, createdAt: now.addingTimeInterval(2), agent: "codex"
+        )
+        try await fixture.repository.createClaudeJob(unsafe)
+        _ = try await fixture.repository.claimNextClaudeJob(startedAt: now.addingTimeInterval(2))
+        try await fixture.repository.requeueInterruptedClaudeJobs()
+        let interrupted = try await fixture.repository.claudeJob(id: unsafe.id)
+        XCTAssertEqual(interrupted?.status, .failed)
     }
 
     func testChannelDefaultsAndExplicitCommands() {

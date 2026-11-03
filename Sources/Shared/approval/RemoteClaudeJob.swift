@@ -16,6 +16,7 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
     public let response: String?
     public let errorMessage: String?
     public let sessionID: String?
+    public let messageQueuedAt: Date?
     public let createdAt: Date
     public let startedAt: Date?
     public let completedAt: Date?
@@ -28,6 +29,7 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         response: String? = nil,
         errorMessage: String? = nil,
         sessionID: String? = nil,
+        messageQueuedAt: Date? = nil,
         createdAt: Date,
         startedAt: Date? = nil,
         completedAt: Date? = nil,
@@ -40,6 +42,7 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         self.response = response
         self.errorMessage = errorMessage
         self.sessionID = sessionID
+        self.messageQueuedAt = messageQueuedAt
         self.createdAt = createdAt
         self.startedAt = startedAt
         self.completedAt = completedAt

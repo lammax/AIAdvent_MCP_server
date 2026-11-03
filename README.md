@@ -177,15 +177,20 @@ history. A missing or inaccessible target produces an error; it never silently
 starts a replacement chat. Existing API clients that omit `conversation` keep
 the previous new-task behavior.
 
-Codex uses public app-server metadata and native `exec resume <id>`. Claude uses
-public Agent SDK session metadata. A selected open Cursor chat receives the request
+Codex uses public app-server metadata for discovery. New chats run through native
+`exec`. Existing chats use `codex queue --thread … --message … --resume`, which
+avoids competing with Codex Desktop's rollout writer and can resume an unloaded
+thread on the managed daemon. Remote matches the resulting turn through read-only
+app-server history and stores an enqueue receipt before waiting, so a service restart
+continues result collection without submitting the message twice. Existing chats
+retain their current Codex permission profile; new chats use Remote's restricted
+profile. Claude uses public Agent SDK session metadata. A selected open Cursor chat receives the request
 through Claude Code's cross-session `SendMessage`; Remote then reads the next
 non-empty final `end_turn` through the public Agent SDK and persists it for the
 iPhone page. Closed Claude chats fall back to native `--resume <id>`. Only a Cursor
-chat whose agent reports `busy` waits. Codex relies on its native writer lock at
-launch, because app-server `active` also means merely loaded in the desktop app.
-Busy jobs retain their ID across restart, retry after five seconds and allow other
-ready jobs to run. The open-Cursor path has a 30-minute response deadline.
+chat whose agent reports `busy` waits. Busy jobs retain their ID across restart,
+retry after five seconds and allow other ready jobs to run. The open-Cursor path has
+a 30-minute response deadline.
 
 Every accepted Claude web job receives a current-turn channel instruction: the
 server has already enabled Claude Remote mode atomically, and the web worker must

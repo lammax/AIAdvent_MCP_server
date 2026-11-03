@@ -262,6 +262,15 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         }
     }
 
+    public func markCodexMessageQueued(id: UUID, at: Date) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE remote_claude_jobs SET message_queued_at = ? WHERE id = ? AND status = 'running' AND agent = 'codex' AND message_queued_at IS NULL",
+                arguments: [at.timeIntervalSince1970, id.uuidString]
+            )
+        }
+    }
+
     public func recentClaudeJobs(limit: Int) async throws -> [RemoteClaudeJob] {
         try await dbQueue.read { db in
             let rows = try Row.fetchAll(
@@ -279,8 +288,11 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
 
     public func requeueInterruptedClaudeJobs() async throws {
         try await dbQueue.write { db in
-            // A terminated task may already have changed files. Never replay it automatically.
-            try db.execute(sql: "UPDATE remote_claude_jobs SET status = 'failed', error_message = 'Interrupted by server restart; inspect changes before retrying.' WHERE status = 'running' AND agent = 'codex'")
+            // A queued Codex message has a durable provider-side identity in its prompt and
+            // must only resume result collection. An older exec task may already have changed
+            // files, so never replay one that was interrupted before the queue receipt existed.
+            try db.execute(sql: "UPDATE remote_claude_jobs SET status = 'queued', started_at = NULL WHERE status = 'running' AND agent = 'codex' AND message_queued_at IS NOT NULL")
+            try db.execute(sql: "UPDATE remote_claude_jobs SET status = 'failed', error_message = 'Interrupted by server restart; inspect changes before retrying.' WHERE status = 'running' AND agent = 'codex' AND message_queued_at IS NULL")
             try db.execute(
                 sql: """
                 UPDATE remote_claude_jobs
@@ -918,6 +930,11 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 table.add(column: "not_before", .double)
             }
         }
+        migrator.registerMigration("addCodexQueuedMessageReceipt") { db in
+            try db.alter(table: "remote_claude_jobs") { table in
+                table.add(column: "message_queued_at", .double)
+            }
+        }
         return migrator
     }
 
@@ -968,6 +985,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         }
         let startedAt: Double? = row["started_at"]
         let completedAt: Double? = row["completed_at"]
+        let messageQueuedAt: Double? = row["message_queued_at"]
         return RemoteClaudeJob(
             id: id,
             prompt: row["prompt"],
@@ -976,6 +994,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             response: row["response"],
             errorMessage: row["error_message"],
             sessionID: row["session_id"],
+            messageQueuedAt: messageQueuedAt.map(Date.init(timeIntervalSince1970:)),
             createdAt: Date(timeIntervalSince1970: row["created_at"]),
             startedAt: startedAt.map(Date.init(timeIntervalSince1970:)),
             completedAt: completedAt.map(Date.init(timeIntervalSince1970:)),
