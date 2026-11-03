@@ -140,11 +140,13 @@ private enum CodexThreadHistoryReader {
             "method": "thread/read",
             "params": ["threadId": threadID, "includeTurns": true],
         ], to: inputPipe.fileHandleForWriting)
+        while !containsResponse(id: 2, in: data) {
+            let chunk = outputPipe.fileHandleForReading.availableData
+            guard !chunk.isEmpty else { throw RemoteConversationError.unavailable }
+            data.append(chunk)
+            guard data.count < 5_000_000 else { throw RemoteConversationError.unavailable }
+        }
         try inputPipe.fileHandleForWriting.close()
-        data.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
-        guard data.count < 5_000_000 else { throw RemoteConversationError.unavailable }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw RemoteConversationError.unavailable }
         guard let message = data.split(separator: 10).compactMap({ line -> [String: Any]? in
             try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
         }).first(where: { ($0["id"] as? Int) == 2 || ($0["id"] as? NSNumber)?.intValue == 2 }),

@@ -154,10 +154,12 @@ final class RemoteTests: XCTestCase {
                   printf '%s\\n' '{"id":1,"result":{}}'
                   ;;
                 3)
-                  printf '%s\\n' '{"id":2,"result":{"thread":{"id":"\(id)","turns":[{"id":"turn","status":"completed","items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]},{"id":"agent","type":"agentMessage","text":"Retained"}]}]}}}'
+                  (sleep 1; printf '%s\\n' '{"id":2,"result":{"thread":{"id":"\(id)","turns":[{"id":"turn","status":"completed","items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]},{"id":"agent","type":"agentMessage","text":"Retained"}]}]}}}') &
+                  response_pid=$!
                   ;;
               esac
             done
+            if [ -n "${response_pid:-}" ]; then kill "$response_pid" 2>/dev/null || true; fi
             exit 0
             ;;
         esac
