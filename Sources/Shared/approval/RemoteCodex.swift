@@ -52,6 +52,7 @@ public enum RemoteCodexPermissions {
 }
 
 public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
+    static let codexRotationThresholdBytes: Int64 = 25 * 1_024 * 1_024
     public let claude: ClaudeCLIRunner
     public let codexPath: String
     public let projects: [RemoteProject]
@@ -88,13 +89,39 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
         guard job.agent == "codex" else { throw RemoteClaudeJobError.processFailed("Unknown agent.") }
         let directory = try RemoteProject.resolve(job.workingDirectory, in: projects)
         let prompt = Self.codexPrompt(job: job, directory: directory)
-        if job.sessionID != nil {
+        if let retiredSessionID = job.sessionID,
+           let selectedConversation,
+           selectedConversation.historyBytes.map({ $0 > Self.codexRotationThresholdBytes }) == true {
             guard let repository else { throw RemoteConversationError.unavailable }
-            return try await RemoteCodexQueueRunner(
+            let summary = try await RemoteCodexQueueRunner(
                 codexPath: codexPath,
                 repository: repository
-            ).run(job: job, directory: directory, prompt: prompt)
+            ).run(
+                job: job,
+                directory: directory,
+                prompt: Self.rotationSummaryPrompt(jobID: job.id, directory: directory)
+            ).response
+            return try await runNewCodexThread(
+                job: job,
+                directory: directory,
+                prompt: Self.rotatedCodexPrompt(job: job, directory: directory, summary: summary),
+                retiredSessionID: retiredSessionID
+            )
         }
+        if job.sessionID != nil {
+            guard let repository else { throw RemoteConversationError.unavailable }
+            return try await RemoteCodexQueueRunner(codexPath: codexPath, repository: repository)
+                .run(job: job, directory: directory, prompt: prompt)
+        }
+        return try await runNewCodexThread(job: job, directory: directory, prompt: prompt)
+    }
+
+    private func runNewCodexThread(
+        job: RemoteClaudeJob,
+        directory: String,
+        prompt: String,
+        retiredSessionID: String? = nil
+    ) async throws -> RemoteClaudeJobResult {
         return try await Task.detached {
             let outputDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("remote-codex-\(UUID())")
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: false,
@@ -130,7 +157,7 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 "-c", "approval_policy=\"never\"",
                 "-c", "mcp_servers.remote.required=true"
                 ]
-                + (job.sessionID.map { ["resume", $0] } ?? ["--thread-source", "remote"])
+                + ["--thread-source", "remote"]
                 + ["--skip-git-repo-check", "--json", "--output-last-message", outputURL.path,
                    "--", prompt]
             let pipe = Pipe()
@@ -154,27 +181,72 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                     let line = Data(lines[..<end]); lines.removeSubrange(...end)
                     if let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                        event["type"] as? String == "thread.started", let id = event["thread_id"] as? String {
-                        guard UUID(uuidString: id) != nil,
-                              job.sessionID == nil || UUID(uuidString: id) == job.sessionID.flatMap(UUID.init(uuidString:)) else {
-                            throw RemoteConversationError.missing
-                        }
+                        guard UUID(uuidString: id) != nil else { throw RemoteConversationError.missing }
                         actualSessionID = id
+                        if let retiredSessionID {
+                            guard let repository else { throw RemoteConversationError.unavailable }
+                            try await repository.markCodexConversationRotated(
+                                jobID: job.id,
+                                project: directory,
+                                retiredSessionID: retiredSessionID,
+                                successorSessionID: id,
+                                at: Date()
+                            )
+                        }
                     }
                 }
                 if lines.count > 1_000_000 { lines.removeAll(keepingCapacity: true) }
             }
-            process.waitUntilExit()
+            if process.isRunning { process.waitUntilExit() }
             guard process.terminationStatus == 0 else {
-                if job.sessionID != nil, actualSessionID == nil,
-                   String(data: tail, encoding: .utf8)?.contains("already has an active writer") == true {
-                    throw RemoteConversationError.busy
-                }
                 throw RemoteClaudeJobError.processFailed("Codex exited with status \(process.terminationStatus). " + (String(data: tail, encoding: .utf8) ?? ""))
             }
             let result = try String(contentsOf: outputURL, encoding: .utf8)
             guard let actualSessionID else { throw RemoteConversationError.unavailable }
             return RemoteClaudeJobResult(response: String(result.prefix(200_000)), sessionID: actualSessionID)
         }.value
+    }
+
+    static func rotationSummaryPrompt(jobID: UUID, directory: String) -> String {
+        """
+        Remote is rotating this Codex chat because its persisted history exceeded 25 MiB.
+        Remote task ID: \(jobID.uuidString)
+        Do not modify files, run commands, ask questions, or continue the pending user task.
+        Produce only a compact, self-contained handoff summary for a new Codex chat in project
+        \(directory). Keep the latest and still-relevant information: current goals, architecture,
+        decisions, implemented state, uncommitted work, important recent commits, remaining tasks,
+        operating constraints, and user preferences. Omit superseded decisions, old diagnostics,
+        raw logs, and conversational filler. Resolve conflicts in favor of the newest instruction.
+        Return only the handoff summary.
+        """
+    }
+
+    static func rotatedCodexPrompt(job: RemoteClaudeJob, directory: String, summary: String) -> String {
+        let context = String(summary.prefix(50_000))
+        return """
+        This is a clean continuation of a previous Codex chat. Treat the following handoff as
+        context, verify mutable repository state before relying on it, and do not consult the
+        retired chat unless the user explicitly asks.
+
+        HANDOFF SUMMARY
+        \(context)
+        END HANDOFF SUMMARY
+
+        \(codexPrompt(job: RemoteClaudeJob(
+            id: job.id,
+            prompt: job.prompt,
+            workingDirectory: job.workingDirectory,
+            status: job.status,
+            response: job.response,
+            errorMessage: job.errorMessage,
+            sessionID: nil,
+            messageQueuedAt: job.messageQueuedAt,
+            createdAt: job.createdAt,
+            startedAt: job.startedAt,
+            completedAt: job.completedAt,
+            agent: job.agent
+        ), directory: directory))
+        """
     }
 
     static func codexPrompt(job: RemoteClaudeJob, directory: String) -> String {

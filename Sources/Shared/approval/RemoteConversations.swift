@@ -7,6 +7,7 @@ public struct RemoteConversation: Codable, Sendable, Equatable {
     public let updatedAt: Double
     public var busy: Bool
     public var open: Bool? = nil
+    public var historyBytes: Int64? = nil
 }
 
 public struct RemoteProjectChoice: Codable, Sendable, Equatable {
@@ -52,8 +53,11 @@ public actor RemoteConversationCatalog {
         let paths = Set(([canonical] + (registered?.chatPaths ?? [])).filter { $0.hasPrefix("/") }
             .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path })
         let known = try await repository.conversationSessionIDs(agent: agent, project: canonical)
+        let retired = try await repository.retiredConversationSessionIDs(agent: agent, project: canonical)
         let result = try await reader.list(agent: agent, projects: paths.sorted(), knownRemoteIDs: Set(known))
-        return result.filter { UUID(uuidString: $0.id) != nil && paths.contains($0.project) }
+        return result.filter {
+            UUID(uuidString: $0.id) != nil && paths.contains($0.project) && !retired.contains($0.id)
+        }
             .sorted { $0.updatedAt == $1.updatedAt ? $0.id < $1.id : $0.updatedAt > $1.updatedAt }
     }
 
@@ -192,8 +196,17 @@ public struct RemoteCLIConversationsReader: RemoteConversationsReading {
                 // Codex's app-server `active` status also means merely loaded in a
                 // desktop client. The native writer lock is the authoritative busy
                 // check when `exec resume` starts.
-                updatedAt: updated, busy: false)
+                updatedAt: updated, busy: false,
+                historyBytes: Self.historyBytes(path: row["path"] as? String))
         }
+    }
+
+    private static func historyBytes(path: String?) -> Int64? {
+        guard let path, path.hasPrefix("/"),
+              let size = try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber else {
+            return nil
+        }
+        return size.int64Value
     }
 
     private static func process(executable: String, arguments: [String]) throws -> (Process, Pipe, Pipe, DispatchSourceTimer) {

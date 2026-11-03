@@ -35,6 +35,39 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(Set(result.map(\.id)), [normal, known])
     }
 
+    func testCodexCatalogReadsHistorySizeAndExcludesRetiredConversation() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let transcript = fixture.directory.appendingPathComponent("rollout.jsonl")
+        XCTAssertTrue(FileManager.default.createFile(atPath: transcript.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: transcript)
+        try handle.truncate(atOffset: UInt64(RemoteAgentRunner.codexRotationThresholdBytes + 1))
+        try handle.close()
+        let oldID = UUID().uuidString, successorID = UUID().uuidString
+        let data = try JSONSerialization.data(withJSONObject: ["data": [[
+            "id": oldID, "cwd": path, "updatedAt": 2.0, "source": "vscode",
+            "name": "Large", "path": transcript.path,
+        ]]])
+        let decoded = try RemoteCLIConversationsReader.decodeCodex(data, knownRemoteIDs: [])
+        XCTAssertEqual(decoded.first?.historyBytes, RemoteAgentRunner.codexRotationThresholdBytes + 1)
+
+        let job = RemoteClaudeJob(id: UUID(), prompt: "Rotate", workingDirectory: path,
+                                  status: .running, sessionID: oldID, createdAt: Date(), agent: "codex")
+        try await fixture.repository.createClaudeJob(job)
+        _ = try await fixture.repository.claimNextClaudeJob(startedAt: Date())
+        try await fixture.repository.markCodexConversationRotated(
+            jobID: job.id, project: path, retiredSessionID: oldID,
+            successorSessionID: successorID, at: Date()
+        )
+        let catalog = RemoteConversationCatalog(
+            reader: TestConversationReader(rows: decoded), repository: fixture.repository,
+            projects: [RemoteProject(name: "Test", path: path)]
+        )
+        let visible = try await catalog.list(agent: "codex", project: path)
+        XCTAssertTrue(visible.isEmpty)
+    }
+
     func testClaudeUsesOpenCursorChatNamesAndKeepsUnopenedProjects() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
@@ -189,6 +222,79 @@ final class RemoteTests: XCTestCase {
             _ = try await runner.run(job: job)
             XCTFail("Busy owner must defer")
         } catch RemoteConversationError.busy {}
+    }
+
+    func testOversizedCodexConversationRotatesThroughSummaryAndRetiresOldChat() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let oldID = UUID().uuidString, newID = UUID().uuidString, jobID = UUID()
+        let script = fixture.directory.appendingPathComponent("rotation-probe")
+        let queueArguments = fixture.directory.appendingPathComponent("queue-arguments")
+        let newPrompt = fixture.directory.appendingPathComponent("new-prompt")
+        try """
+        #!/bin/sh
+        case "$1" in
+          queue)
+            printf '%s\\n' "$@" > "\(queueArguments.path)"
+            exit 0
+            ;;
+          app-server)
+            count=0
+            while IFS= read -r line; do
+              count=$((count + 1))
+              case "$count" in
+                1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+                3) printf '%s\\n' '{"id":2,"result":{"data":[{"id":"summary","status":"completed","itemsView":"summary","items":[{"type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]},{"type":"agentMessage","text":"CURRENT IMPORTANT SUMMARY"}]}],"nextCursor":null}}' ;;
+              esac
+            done
+            exit 0
+            ;;
+          exec)
+            output=''
+            prompt=''
+            while [ "$#" -gt 0 ]; do
+              if [ "$1" = '--output-last-message' ]; then shift; output="$1"; fi
+              prompt="$1"
+              shift
+            done
+            printf '%s' "$prompt" > "\(newPrompt.path)"
+            printf '%s' 'Rotated answer' > "$output"
+            printf '%s\\n' '{"type":"thread.started","thread_id":"\(newID)"}'
+            exit 0
+            ;;
+        esac
+        exit 8
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let project = RemoteProject(name: "Test", path: path)
+        let job = RemoteClaudeJob(id: jobID, prompt: "Do the current task", workingDirectory: path,
+                                  status: .queued, sessionID: oldID, createdAt: Date(), agent: "codex")
+        try await fixture.repository.createClaudeJob(job)
+        let claimed = try await fixture.repository.claimNextClaudeJob(startedAt: Date())
+        let running = try XCTUnwrap(claimed)
+        let catalog = RemoteConversationCatalog(
+            reader: TestConversationReader(rows: [
+                .init(id: oldID, title: "Large", project: path, updatedAt: 1, busy: false,
+                      historyBytes: RemoteAgentRunner.codexRotationThresholdBytes + 1)
+            ]),
+            repository: fixture.repository,
+            projects: [project]
+        )
+        let runner = RemoteAgentRunner(
+            claude: ClaudeCLIRunner(executablePath: script.path), codexPath: script.path,
+            projects: [project], conversations: catalog, repository: fixture.repository
+        )
+        let result = try await runner.run(job: running)
+        XCTAssertEqual(result, .init(response: "Rotated answer", sessionID: newID))
+        XCTAssertTrue(try String(contentsOf: queueArguments, encoding: .utf8).contains("persisted history exceeded 25 MiB"))
+        let prompt = try String(contentsOf: newPrompt, encoding: .utf8)
+        XCTAssertTrue(prompt.contains("CURRENT IMPORTANT SUMMARY"))
+        XCTAssertTrue(prompt.contains("Do the current task"))
+        let persisted = try await fixture.repository.claudeJob(id: jobID)
+        let retired = try await fixture.repository.retiredConversationSessionIDs(agent: "codex", project: path)
+        XCTAssertEqual(persisted?.sessionID, newID)
+        XCTAssertEqual(retired, [oldID])
     }
 
     func testDispatchedCodexJobResumesCollectionAfterRestartWithoutReplay() async throws {

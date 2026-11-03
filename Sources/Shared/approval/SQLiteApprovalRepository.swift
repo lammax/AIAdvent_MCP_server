@@ -255,6 +255,16 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         }
     }
 
+    public func retiredConversationSessionIDs(agent: String, project: String) async throws -> Set<String> {
+        try await dbQueue.read { db in
+            Set(try String.fetchAll(
+                db,
+                sql: "SELECT session_id FROM remote_retired_conversations WHERE agent = ? AND project = ?",
+                arguments: [agent, project]
+            ))
+        }
+    }
+
     public func deferBusyConversation(id: UUID, until: Date) async throws {
         try await dbQueue.write { db in
             try db.execute(sql: "UPDATE remote_claude_jobs SET status = 'queued', started_at = NULL, not_before = ?, error_message = ? WHERE id = ? AND status = 'running'",
@@ -267,6 +277,33 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             try db.execute(
                 sql: "UPDATE remote_claude_jobs SET message_queued_at = ? WHERE id = ? AND status = 'running' AND agent = 'codex' AND message_queued_at IS NULL",
                 arguments: [at.timeIntervalSince1970, id.uuidString]
+            )
+        }
+    }
+
+    public func markCodexConversationRotated(
+        jobID: UUID,
+        project: String,
+        retiredSessionID: String,
+        successorSessionID: String,
+        at: Date
+    ) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE remote_claude_jobs SET session_id = ? WHERE id = ? AND status = 'running' AND agent = 'codex'",
+                arguments: [successorSessionID, jobID.uuidString]
+            )
+            guard db.changesCount == 1 else { throw ApprovalPersistenceError.corruptRecord }
+            try db.execute(
+                sql: """
+                INSERT INTO remote_retired_conversations (agent, project, session_id, successor_session_id, retired_at)
+                VALUES ('codex', ?, ?, ?, ?)
+                ON CONFLICT(agent, session_id) DO UPDATE SET
+                    project = excluded.project,
+                    successor_session_id = excluded.successor_session_id,
+                    retired_at = excluded.retired_at
+                """,
+                arguments: [project, retiredSessionID, successorSessionID, at.timeIntervalSince1970]
             )
         }
     }
@@ -933,6 +970,16 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         migrator.registerMigration("addCodexQueuedMessageReceipt") { db in
             try db.alter(table: "remote_claude_jobs") { table in
                 table.add(column: "message_queued_at", .double)
+            }
+        }
+        migrator.registerMigration("addRetiredRemoteConversations") { db in
+            try db.create(table: "remote_retired_conversations") { table in
+                table.column("agent", .text).notNull()
+                table.column("project", .text).notNull().indexed()
+                table.column("session_id", .text).notNull()
+                table.column("successor_session_id", .text).notNull()
+                table.column("retired_at", .double).notNull()
+                table.primaryKey(["agent", "session_id"])
             }
         }
         return migrator
