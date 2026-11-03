@@ -4,9 +4,11 @@ import Foundation
 public struct RemoteProject: Codable, Sendable, Equatable {
     public let name: String
     public let path: String
-    public init(name: String, path: String) {
+    public let chatPaths: [String]?
+    public init(name: String, path: String, chatPaths: [String]? = nil) {
         self.name = name
         self.path = path
+        self.chatPaths = chatPaths
     }
 
     public static func load(from path: String) throws -> [RemoteProject] {
@@ -53,15 +55,32 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
     public let claude: ClaudeCLIRunner
     public let codexPath: String
     public let projects: [RemoteProject]
+    public let conversations: RemoteConversationCatalog?
 
-    public init(claude: ClaudeCLIRunner, codexPath: String, projects: [RemoteProject]) {
+    public init(claude: ClaudeCLIRunner, codexPath: String, projects: [RemoteProject], conversations: RemoteConversationCatalog? = nil) {
         self.claude = claude
         self.codexPath = codexPath
         self.projects = projects
+        self.conversations = conversations
     }
 
     public func run(job: RemoteClaudeJob) async throws -> RemoteClaudeJobResult {
-        if job.agent == "claude" { return try await claude.run(job: job) }
+        var selectedConversation: RemoteConversation?
+        if let id = job.sessionID {
+            guard let conversations else { throw RemoteConversationError.unavailable }
+            let target = try await conversations.validate(agent: job.agent, project: job.workingDirectory, id: id)
+            if target.busy { throw RemoteConversationError.busy }
+            selectedConversation = target
+        }
+        if job.agent == "claude" {
+            if let selectedConversation, selectedConversation.open == true {
+                return try await claude.runInOpenCursorChat(
+                    job: job,
+                    peerName: selectedConversation.title
+                )
+            }
+            return try await claude.run(job: job)
+        }
         guard job.agent == "codex" else { throw RemoteClaudeJobError.processFailed("Unknown agent.") }
         let directory = try RemoteProject.resolve(job.workingDirectory, in: projects)
         return try await Task.detached {
@@ -73,6 +92,9 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: codexPath)
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
+            var environment = ProcessInfo.processInfo.environment
+            environment["REMOTE_MESSAGE_CHANNEL"] = "web"
+            process.environment = environment
             var gitHosts = Set<String>()
             for flags in [["--all"], ["--push", "--all"]] {
                 let git = Process()
@@ -90,19 +112,26 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                     }
                 }
             }
-            process.arguments = ["exec", "--skip-git-repo-check"]
+            process.arguments = ["exec", "-C", directory]
                 + RemoteCodexPermissions.overrides(gitHosts: gitHosts).flatMap { ["-c", $0] }
                 + [
                 "-c", "approval_policy=\"never\"",
-                "-c", "mcp_servers.remote.required=true",
-                "-C", directory, "--output-last-message", outputURL.path,
+                "-c", "mcp_servers.remote.required=true"
+                ]
+                + (job.sessionID.map { ["resume", $0] } ?? ["--thread-source", "remote"])
+                + [
+                "--skip-git-repo-check", "--json", "--output-last-message", outputURL.path,
                 "--", """
                 This task was submitted through Remote on the user's iPhone.
                 For blocking task questions use mcp__remote__ask_user with agent "codex",
-                project "\(directory)", and chat "\(job.id.uuidString)".
+                project "\(directory)", and the actual current chat ID when available.
+                The selected existing chat ID is "\(job.sessionID ?? "new chat")".
                 Each such call automatically queues Web Push. Never fabricate a human answer.
                 Return your final report as the final response; Remote displays it on the task page.
                 Host sandbox and approval restrictions still apply.
+                This process has REMOTE_MESSAGE_CHANNEL=web. Never apply the desktop-message
+                mode reset here. Mode was set when the web request was accepted; do not reset
+                it when this queued task starts or resumes after a desktop message.
                 A Remote-only permission profile allows project edits and git commits.
                 Command network access is restricted to this project's HTTPS origin hosts.
                 Commit only when requested; after a requested commit, push normally to the
@@ -117,20 +146,43 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             process.standardOutput = pipe
             process.standardError = pipe
             try process.run()
+            defer {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }
+            }
             // Drain output to avoid a full pipe blocking the child; retain only a bounded tail.
             var tail = Data()
+            var lines = Data()
+            var actualSessionID: String?
             while true {
                 let chunk = pipe.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
                 tail.append(chunk)
                 if tail.count > 20_000 { tail = Data(tail.suffix(20_000)) }
+                lines.append(chunk)
+                while let end = lines.firstIndex(of: 10) {
+                    let line = Data(lines[..<end]); lines.removeSubrange(...end)
+                    if let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                       event["type"] as? String == "thread.started", let id = event["thread_id"] as? String {
+                        guard UUID(uuidString: id) != nil,
+                              job.sessionID == nil || UUID(uuidString: id) == job.sessionID.flatMap(UUID.init(uuidString:)) else {
+                            throw RemoteConversationError.missing
+                        }
+                        actualSessionID = id
+                    }
+                }
+                if lines.count > 1_000_000 { lines.removeAll(keepingCapacity: true) }
             }
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
+                if job.sessionID != nil, actualSessionID == nil,
+                   String(data: tail, encoding: .utf8)?.contains("already has an active writer") == true {
+                    throw RemoteConversationError.busy
+                }
                 throw RemoteClaudeJobError.processFailed("Codex exited with status \(process.terminationStatus). " + (String(data: tail, encoding: .utf8) ?? ""))
             }
             let result = try String(contentsOf: outputURL, encoding: .utf8)
-            return RemoteClaudeJobResult(response: String(result.prefix(200_000)), sessionID: nil)
+            guard let actualSessionID else { throw RemoteConversationError.unavailable }
+            return RemoteClaudeJobResult(response: String(result.prefix(200_000)), sessionID: actualSessionID)
         }.value
     }
 }

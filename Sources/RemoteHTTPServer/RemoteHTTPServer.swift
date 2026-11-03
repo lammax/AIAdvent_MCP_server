@@ -19,6 +19,10 @@ enum RemoteHTTPServer {
         let projects = try RemoteProject.load(from: remoteHome.appendingPathComponent("projects.json").path)
         let codexPath = ProcessInfo.processInfo.environment["REMOTE_CODEX_PATH"]
             ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        let conversations = RemoteConversationCatalog(
+            reader: RemoteCLIConversationsReader(codexPath: codexPath, claudePath: configuration.claudeExecutablePath),
+            repository: repository, projects: projects
+        )
         let approvalService = ApprovalService(
             repository: repository,
             timeout: configuration.timeout
@@ -28,7 +32,8 @@ enum RemoteHTTPServer {
             runner: RemoteAgentRunner(
                 claude: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
                 codexPath: codexPath,
-                projects: projects
+                projects: projects,
+                conversations: conversations
             ),
             workingDirectory: configuration.claudeWorkingDirectory
         )
@@ -84,7 +89,8 @@ enum RemoteHTTPServer {
             projects: projects,
             usage: RemoteUsageService(reader: RemoteCLIUsageReader(
                 codexPath: codexPath, claudePath: configuration.claudeExecutablePath
-            ))
+            )),
+            conversations: conversations
         )
 
         do {

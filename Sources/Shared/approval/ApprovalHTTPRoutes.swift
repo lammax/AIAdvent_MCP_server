@@ -3,6 +3,8 @@ import CryptoKit
 import Vapor
 
 extension RemoteProject: Content {}
+extension RemoteConversation: Content {}
+extension RemoteProjectChoice: Content {}
 extension RemoteAgentMode: Content {}
 
 public struct ApprovalHTTPAuthorization: Sendable {
@@ -143,7 +145,8 @@ public func configureApprovalHTTPRoutes(
     push: RemotePushHTTPContext? = nil,
     agentRepository: SQLiteApprovalRepository? = nil,
     projects: [RemoteProject] = [],
-    usage: RemoteUsageService? = nil
+    usage: RemoteUsageService? = nil,
+    conversations: RemoteConversationCatalog? = nil
 ) {
     app.get { request in
         request.redirect(to: "/approvals")
@@ -174,9 +177,30 @@ public func configureApprovalHTTPRoutes(
         try requireAuthorization(request, authorization: authorization)
         return try await agentRepository?.remoteModes() ?? []
     }
-    app.get("api", "remote", "projects") { request throws -> [RemoteProject] in
+    app.get("api", "remote", "projects") { request async throws -> [RemoteProjectChoice] in
         try requireAuthorization(request, authorization: authorization)
-        return projects
+        let agent = (try? request.query.get(String.self, at: "agent")) ?? "codex"
+        guard ["codex", "claude"].contains(agent) else { throw Abort(.badRequest) }
+        if agent == "claude", let conversations {
+            do { return try await conversations.projectChoices(agent: agent) }
+            catch {
+                request.logger.warning("Claude project discovery failed", metadata: ["error-type": "\(String(reflecting: type(of: error)))"])
+                throw Abort(.serviceUnavailable, reason: RemoteConversationError.unavailable.localizedDescription)
+            }
+        }
+        return projects.map { RemoteProjectChoice(name: $0.name, path: $0.path) }
+    }
+    app.get("api", "remote", "conversations") { request async throws -> [RemoteConversation] in
+        try requireAuthorization(request, authorization: authorization)
+        guard let conversations else { throw Abort(.serviceUnavailable) }
+        let agent = try request.query.get(String.self, at: "agent")
+        let project = try request.query.get(String.self, at: "project")
+        do { return try await conversations.list(agent: agent, project: project) }
+        catch is RemoteClaudeJobError { throw Abort(.badRequest, reason: "Choose a registered project.") }
+        catch {
+            request.logger.warning("Conversation discovery failed", metadata: ["agent": "\(agent)", "error-type": "\(String(reflecting: type(of: error)))", "error-domain": "\((error as NSError).domain)", "error-code": "\((error as NSError).code)"])
+            throw Abort(.serviceUnavailable, reason: RemoteConversationError.unavailable.localizedDescription)
+        }
     }
     app.get("codex") { request -> Response in
         guard authorization.isAuthorized(request) else { return request.redirect(to: "/login") }
@@ -192,13 +216,15 @@ public func configureApprovalHTTPRoutes(
         try requireMutationAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
         let body = try request.content.decode(RemoteCodexSubmitRequest.self)
-        guard try await agentRepository?.remoteModes().first(where: { $0.agent == "codex" })?.enabled == true else {
-            throw Abort(.conflict, reason: "Enable Codex Remote mode first.")
-        }
         let project: String
         do { project = try RemoteProject.resolve(body.project, in: projects) }
         catch { throw Abort(.badRequest, reason: "Choose a registered project.") }
-        return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt, agent: "codex", project: project))
+        let sessionID = try await selectedConversation(body.conversation, id: body.sessionID, agent: "codex", project: project, catalog: conversations)
+        do {
+            return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt, agent: "codex", project: project, fromWeb: true, sessionID: sessionID))
+        } catch let error as RemoteClaudeJobError {
+            throw Abort(.badRequest, reason: error.localizedDescription)
+        }
     }
 
     app.get("manifest.webmanifest") { _ throws -> Response in
@@ -356,13 +382,16 @@ public func configureApprovalHTTPRoutes(
     app.post("claude", "jobs") { request async throws -> RemoteClaudeJobResponse in
         try requireMutationAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
-        if let modes = try await agentRepository?.remoteModes(),
-           modes.first(where: { $0.agent == "claude" })?.enabled == false {
-            throw Abort(.conflict, reason: "Claude Remote mode is disabled.")
-        }
         let body = try request.content.decode(RemoteClaudeSubmitRequest.self)
+        let project: String?
+        if let selected = body.project {
+            do { project = try RemoteProject.resolve(selected, in: projects) }
+            catch { throw Abort(.badRequest, reason: "Choose a registered project.") }
+        } else { project = nil }
+        if body.conversation == "latest", project == nil { throw Abort(.badRequest, reason: "Select a project to continue a chat.") }
+        let sessionID = try await selectedConversation(body.conversation, id: body.sessionID, agent: "claude", project: project ?? "", catalog: conversations)
         do {
-            return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt))
+            return RemoteClaudeJobResponse(try await claudeService.submit(prompt: body.prompt, project: project, fromWeb: true, sessionID: sessionID))
         } catch let error as RemoteClaudeJobError {
             throw Abort(.badRequest, reason: error.localizedDescription)
         }
@@ -420,6 +449,20 @@ public func configureApprovalHTTPRoutes(
         guard let push else { throw Abort(.serviceUnavailable, reason: "Push is not configured.") }
         return RemotePushTestResponse(eventID: try await push.repository.enqueueTestPush(now: Date()))
     }
+}
+
+private func selectedConversation(_ choice: String?, id: String?, agent: String, project: String,
+                                  catalog: RemoteConversationCatalog?) async throws -> String? {
+    guard choice == nil || choice == "new" || choice == "latest" else { throw Abort(.badRequest) }
+    if choice != "latest" {
+        guard id == nil else { throw Abort(.badRequest, reason: "A new chat cannot have an existing session ID.") }
+        return nil
+    }
+    guard let id, UUID(uuidString: id) != nil else { throw Abort(.badRequest, reason: "Select the chat shown for this project.") }
+    guard let catalog else { throw Abort(.serviceUnavailable) }
+    do { return try await catalog.validate(agent: agent, project: project, id: id).id }
+    catch RemoteConversationError.missing { throw Abort(.conflict, reason: RemoteConversationError.missing.localizedDescription) }
+    catch { throw Abort(.serviceUnavailable, reason: RemoteConversationError.unavailable.localizedDescription) }
 }
 
 private func requireAuthorization(
@@ -489,7 +532,7 @@ private func bundledResourceResponse(
     contentType: String,
     cacheControl: String = "public, max-age=3600"
 ) throws -> Response {
-    guard let url = Bundle.module.url(forResource: name, withExtension: fileExtension) else {
+    guard let url = RemoteBundledResource.url(name: name, extension: fileExtension) else {
         throw Abort(.notFound)
     }
     return Response(
@@ -591,11 +634,16 @@ public struct ApprovalListResponse: Content, Sendable {
 
 private struct RemoteClaudeSubmitRequest: Content, Sendable {
     let prompt: String
+    let project: String?
+    let conversation: String?
+    let sessionID: String?
 }
 
 private struct RemoteCodexSubmitRequest: Content, Sendable {
     let prompt: String
     let project: String
+    let conversation: String?
+    let sessionID: String?
 }
 
 public struct RemoteClaudeJobListResponse: Content, Sendable {
@@ -1022,6 +1070,12 @@ private enum ApprovalWebPage {
             </header>
             <section class="card composer">
               <form id="prompt-form">
+                <label for="project">Project</label>
+                <select id="project" required><option value="">Choose a project…</option></select>
+                <label for="conversation">Чат</label>
+                <select id="conversation"><option value="latest">Продолжить последний чат</option><option value="new">Новый чат</option></select>
+                <p id="chat-summary" class="muted" aria-live="polite">Выберите проект.</p>
+                <button id="refresh-chat" class="secondary" type="button">Обновить последний чат</button>
                 <label for="prompt">Request</label>
                 <textarea id="prompt" name="prompt" maxlength="20000" rows="7" placeholder="Ask Claude to work on your Mac…" required></textarea>
                 <button id="send" type="submit">Send to Claude</button>
@@ -1034,6 +1088,12 @@ private enum ApprovalWebPage {
           const form = document.getElementById('prompt-form');
           const csrfToken = '\(csrfToken)';
           const promptInput = document.getElementById('prompt');
+          const projectInput = document.getElementById('project');
+          const conversationInput = document.getElementById('conversation');
+          const chatSummary = document.getElementById('chat-summary');
+          const refreshChat = document.getElementById('refresh-chat');
+          let selectedChat = null;
+          let chatRequest = 0;
           const sendButton = document.getElementById('send');
           const composerMessage = document.getElementById('composer-message');
           const jobsState = document.getElementById('jobs');
@@ -1061,6 +1121,52 @@ private enum ApprovalWebPage {
             }
           });
           let submittingPrompt = false;
+          function updateSendState() {
+            sendButton.disabled = submittingPrompt || !projectInput.value ||
+              (conversationInput.value === 'latest' && !selectedChat);
+          }
+          async function loadConversation() {
+            const sequence = ++chatRequest;
+            selectedChat = null;
+            updateSendState();
+            if (!projectInput.value) { chatSummary.textContent = 'Выберите проект.'; return; }
+            if (conversationInput.value === 'new') {
+              chatSummary.textContent = 'Будет создан новый чат без истории другого чата.';
+              return;
+            }
+            chatSummary.textContent = 'Ищу последний рабочий чат…';
+            try {
+              const agent = window.location.pathname.split('/')[1];
+              const query = new URLSearchParams({agent, project:projectInput.value});
+              const response = await fetch('/api/remote/conversations?' + query, {credentials:'same-origin'});
+              if (response.status === 401) { window.location = '/login'; return; }
+              if (!response.ok) throw new Error();
+              const chats = await response.json();
+              if (sequence !== chatRequest) return;
+              const requestedSession = projectInput.selectedOptions[0]?.dataset.sessionId;
+              selectedChat = (requestedSession ? chats.find(chat => chat.id === requestedSession) : chats[0]) || null;
+              chatSummary.textContent = selectedChat
+                ? selectedChat.title + ' · ' + new Date(selectedChat.updatedAt * 1000).toLocaleString() +
+                  ' · ' + selectedChat.id.slice(0, 8) + (selectedChat.busy ? ' · Чат открыт другим клиентом, запрос будет ждать.' : '')
+                : 'Рабочих чатов нет. Выберите «Новый чат».';
+            } catch (_) {
+              if (sequence === chatRequest) chatSummary.textContent = 'Не удалось получить чаты. Повторите обновление или явно выберите новый чат.';
+            }
+            if (sequence === chatRequest) updateSendState();
+          }
+          projectInput.addEventListener('change', loadConversation);
+          conversationInput.addEventListener('change', loadConversation);
+          refreshChat.addEventListener('click', loadConversation);
+          updateSendState();
+          const projectsAgent = window.location.pathname.split('/')[1];
+          fetch('/api/remote/projects?' + new URLSearchParams({agent:projectsAgent}), {credentials:'same-origin'})
+            .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+            .then(projects => projects.forEach(p => {
+              const option = new Option(p.name, p.path);
+              if (p.sessionID) option.dataset.sessionId = p.sessionID;
+              projectInput.add(option);
+            }))
+            .catch(() => { chatSummary.textContent = 'Unable to load registered projects.'; });
           let renderedJobs = null;
           const expandedJobOutputs = new Set();
           try {
@@ -1151,9 +1257,10 @@ private enum ApprovalWebPage {
                 node('time', 'muted', formatDate(job.createdAt))
               );
               article.append(heading);
+              if (job.sessionID) article.append(node('p', 'muted', 'Чат: ' + job.sessionID));
               appendJobOutput(article, job, 'job-prompt', job.prompt, 'prompt');
               if (job.status === 'queued') {
-                article.append(node('p', 'muted', 'Waiting for the local Claude worker…'));
+                article.append(node('p', 'muted', job.errorMessage || 'Waiting for the local Claude worker…'));
               } else if (job.status === 'running') {
                 article.append(node('p', 'muted', 'Claude is working. Approval questions will appear on the Approvals page.'));
               } else if (job.status === 'completed') {
@@ -1168,6 +1275,7 @@ private enum ApprovalWebPage {
           form.addEventListener('submit', async (event) => {
             event.preventDefault();
             if (submittingPrompt) return;
+            if (!projectInput.value || (conversationInput.value === 'latest' && !selectedChat)) return;
             const prompt = promptInput.value.trim();
             if (!prompt) return;
             submittingPrompt = true;
@@ -1178,20 +1286,24 @@ private enum ApprovalWebPage {
               const response = await fetch('/claude/jobs', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-                body: JSON.stringify({ prompt })
+                body: JSON.stringify({ prompt, project:projectInput.value, conversation:conversationInput.value,
+                  sessionID:conversationInput.value === 'latest' ? selectedChat.id : undefined })
               });
               if (response.status === 401) { window.location = '/login'; return; }
-              if (!response.ok) throw new Error('Submit failed');
+              if (!response.ok) {
+                const failure = await response.json().catch(() => ({}));
+                throw new Error(failure.reason || 'The request could not be queued.');
+              }
               promptInput.value = '';
               composerMessage.textContent = 'Request queued.';
               renderedJobs = null;
               await loadJobs();
-            } catch (_) {
-              composerMessage.textContent = 'The request could not be queued.';
+            } catch (error) {
+              composerMessage.textContent = error.message || 'The request could not be queued.';
               composerMessage.className = 'error';
             } finally {
               submittingPrompt = false;
-              sendButton.disabled = false;
+              updateSendState();
               sendButton.textContent = 'Send to Claude';
             }
           });
@@ -1207,21 +1319,6 @@ private enum ApprovalWebPage {
         claude(csrfToken: csrfToken)
             .replacingOccurrences(of: "/claude", with: "/codex")
             .replacingOccurrences(of: "Claude", with: "Codex")
-            .replacingOccurrences(of: "<label for=\"prompt\">Request</label>", with: """
-                <p class="muted">Start a separate Codex task in the selected project. Workspace writes are allowed; sandbox restrictions remain active.</p>
-                <label for="project">Project</label>
-                <select id="project" required><option value="">Choose a project…</option></select>
-                <label for="prompt">Request</label>
-                """)
-            .replacingOccurrences(of: "const promptInput = document.getElementById('prompt');", with: """
-                const projectInput = document.getElementById('project');
-                const sendProjects = fetch('/api/remote/projects', { credentials: 'same-origin' })
-                  .then(r => { if (!r.ok) throw new Error(); return r.json(); })
-                  .then(projects => projects.forEach(p => projectInput.add(new Option(p.name, p.path))))
-                  .catch(() => { document.getElementById('composer-message').textContent = 'Unable to load registered projects.'; });
-                const promptInput = document.getElementById('prompt');
-                """)
-            .replacingOccurrences(of: "JSON.stringify({ prompt })", with: "JSON.stringify({ prompt, project: projectInput.value })")
             .replacingOccurrences(of: "article.append(heading);",
                                   with: "article.append(heading, node('p', 'muted', job.workingDirectory));")
     }

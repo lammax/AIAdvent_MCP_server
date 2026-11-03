@@ -9,7 +9,27 @@ Local Swift MCP servers used by WorkHarness and related agent tooling. Each serv
 Use `remote-control start --agent codex` or `start --agent claude` to enable that agent.
 Use `stop --agent codex|claude` to disable only that agent; the shared HTTP service remains running.
 The unqualified `stop` is the explicit whole-service administration command.
-Modes persist in SQLite. An absent Codex mode is disabled; legacy Claude requests remain compatible.
+Modes persist in SQLite. A valid authenticated task submitted on `/codex` or `/claude`
+sets that agent's mode in the same transaction as the job insert. Normal web messages
+enable mode, even when previously disabled. Invalid requests and page/Usage/polling
+reads do not change modes. Exact `Я ушёл` / `/remote-start` and `Я здесь` /
+`/remote-stop` commands take precedence over the channel default.
+
+For a new actual desktop/local user message, the installed global instructions and
+`remote-mode` skill run `remote-control desktop --agent codex|claude` before the
+answer/work. It disables only that agent if enabled. Explicit start/stop instructions
+take priority. This desktop path is **agent-instruction based**, not an unconditional
+native hook: `UserPromptSubmit` also covers background events in some clients, so a
+generic hook could incorrectly switch mode. Tool results, approval replies, scheduled
+work and subagent reports are excluded. Existing chats must load the updated rules;
+reopen/reload a Claude chat if it retains the old instructions.
+
+Both web CLI runners set `REMOTE_MESSAGE_CHANNEL=web`; the desktop helper ignores
+those processes. The mode is set when a web message is accepted, never when a queued
+worker starts. A later desktop message can therefore disable mode while that task
+continues. The shared server, jobs and the other agent remain unchanged.
+Global rule entrypoints are `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`;
+the maintained skill sources are in `CodexSkills/remote-mode` and `ClaudeSkills/remote-mode`.
 
 MCP `ask_user` accepts optional `agent`, absolute `project`, and `chat` context.
 Answers remain bound to the request UUID, not the selected UI filter. Approvals can be filtered by agent and project.
@@ -148,6 +168,49 @@ REMOTE_TOKEN_FILE="$token_file" swift run RemoteHTTPServer
 
 Do not place the token in this repository, command history, URLs, logs, or screenshots.
 
+### Continue a project chat from Remote
+
+Both task pages default to **Продолжить последний чат**. Select a registered
+project; Remote shows the most recently updated working chat, its date and ID.
+The submitted ID is pinned in SQLite. **Новый чат** explicitly starts a separate
+history. A missing or inaccessible target produces an error; it never silently
+starts a replacement chat. Existing API clients that omit `conversation` keep
+the previous new-task behavior.
+
+Codex uses public app-server metadata and native `exec resume <id>`. Claude uses
+public Agent SDK session metadata. A selected open Cursor chat receives the request
+through Claude Code's cross-session `SendMessage`; Remote then reads the next
+non-empty final `end_turn` through the public Agent SDK and persists it for the
+iPhone page. Closed Claude chats fall back to native `--resume <id>`. Only a Cursor
+chat whose agent reports `busy` waits. Codex relies on its native writer lock at
+launch, because app-server `active` also means merely loaded in the desktop app.
+Busy jobs retain their ID across restart, retry after five seconds and allow other
+ready jobs to run. The open-Cursor path has a 30-minute response deadline.
+
+Every accepted Claude web job receives a current-turn channel instruction: the
+server has already enabled Claude Remote mode atomically, and the web worker must
+not apply a cached desktop-mode reset or report the old state from chat history.
+
+Claude discovery requires `/opt/homebrew/bin/node` and the pinned metadata SDK.
+On the Claude page, chats currently open in Cursor are listed first under their
+actual Cursor names and pin their exact session IDs. Registered projects without
+an open Cursor chat remain available for starting a new chat.
+Install the support package without copying provider credentials:
+
+```bash
+support_dir="$HOME/Library/Application Support/Remote/support/claude-sessions"
+mkdir -p "$support_dir"
+chmod 700 "$support_dir"
+cp SupportData/claude-sessions/package*.json "$support_dir/"
+npm ci --prefix "$support_dir" --ignore-scripts --omit=optional --no-audit --no-fund
+```
+
+`projects.json` may specify optional `chatPaths` for history lookup aliases.
+Only `path` is an execution root. The installed RemoteApproval entry executes in
+`MCP_server` and looks up its existing history in the legacy RemoteApproval folder.
+When upgrading this feature, back up SQLite and install **both** binaries: the
+HTTP and MCP processes share the new retry migration and resource bundle.
+
 ### Claude Code registration
 
 Keep the HTTP process running for the iPhone UI, but connect Claude Code through the executable's local stdio mode. Both processes use the same SQLite database. Stdio mode does not start another HTTP listener and does not need the browser token.
@@ -195,7 +258,7 @@ https://macbook-pro.tailab24a8.ts.net/claude
 
 For Web Push on iPhone, add the approvals page to the Home Screen, launch that installed PWA, and press **Enable notifications**. The service worker does not cache authenticated pages or approval data. Notifications contain only a generic message and an approval ID deep link; the question and options are fetched after authentication.
 
-The Claude page stores requests in SQLite and runs them one at a time. Jobs survive a web-service restart, and the page polls their queued, running, completed, or failed state without disturbing the request field. Claude is intentionally started with `bypassPermissions`, so a request submitted through this page has the same broad ability to read and change files, run commands, access the network, and call configured MCP tools as a fully trusted local Claude Code task. Keep the page private to the authenticated Tailscale connection.
+The Claude page stores requests in SQLite and runs them one at a time. Jobs survive a web-service restart, and the page polls their queued, running, completed, or failed state without disturbing the request field. Closed/new Claude chats are intentionally started with `bypassPermissions`; requests delivered into an open Cursor chat retain that chat's permission mode. A closed/new task therefore has the same broad ability to read and change files, run commands, access the network, and call configured MCP tools as a fully trusted local Claude Code task. Keep the page private to the authenticated Tailscale connection.
 
 Run `/remote-start` in Claude Code for the initial login, then paste the token from Universal Clipboard. The login form uses the fixed username `remote`, so Chrome or Safari can save the token as a password and autofill it later. The browser receives a 90-day Secure, HttpOnly, SameSite=Strict authentication cookie derived with HMAC from the token. State-changing cookie requests also require a CSRF token and matching HTTPS origin. The cookie remains valid across `/remote-stop`, `/remote-start`, server upgrades, and Mac restarts; rotating the token invalidates it immediately. Saving the credential in the browser's synced password manager is the fallback if browser data is cleared while away from the Mac.
 

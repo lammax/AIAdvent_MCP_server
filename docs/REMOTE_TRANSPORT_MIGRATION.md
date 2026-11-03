@@ -22,27 +22,96 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Persistent local state | **Implemented** | SQLite, token, and stable VAPID configuration remain on the Mac with owner-only permissions |
 | PWA and authenticated Web Push | **Implemented** | Home Screen PWA, service worker, generic payloads, persistent subscriptions, transactional outbox, retries, and stable notification tags are active |
 | Approval workflows | **Implemented** | Single-select, multi-select, free-text, and mixed atomic requests are supported |
-| Remote Claude jobs | **Implemented with known risk** | Jobs persist and run serially, but Claude currently uses `bypassPermissions` |
+| Remote Claude jobs | **Implemented with known risk** | Jobs persist and run serially. Closed/new chats use `bypassPermissions`; delivery into an open Cursor chat keeps that chat's permission mode. |
 | Browser protection | **Implemented baseline** | HMAC-derived Secure/HttpOnly/SameSite session cookie, CSRF token, Origin validation, no-store pages, and security headers |
 | Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
-| Independent agent modes and request context | **Implemented; iPhone verification pending** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive |
-| Switch agent mode by incoming message channel | **Planned** | A user message in the desktop chat disables that agent's Remote mode; an authenticated message submitted through the web enables it. Change only when needed, before handling the message; keep the shared HTTP service and running jobs alive. Reliable desktop message-source detection still needs investigation. |
-| Codex tasks in existing projects | **Implemented; basic live check passed** | Separate `/codex` page, eight registered projects, workspace-write sandbox, persistent job results; live task returned `REMOTE_CODEX_OK`; desktop chat continuation is not implemented |
-| Claude and Codex usage reports | **Implemented; iPhone verification pending** | Usage returns an answer in Remote's task history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. Snapshots retain their collection timestamp, with a 30-second cache and a 25-second subprocess deadline. |
+| Independent agent modes and request context | **Implemented; basic iPhone flow verified** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive. The full multi-agent stop/restart matrix remains to be checked. |
+| Switch agent mode by incoming message channel | **Implemented; desktop via agent instructions** | Valid web task submission and its agent mode are stored atomically. Desktop global rules/skills call an idempotent per-agent helper before handling a real user message. Explicit commands take priority; web workers carry a channel marker and cannot undo a later desktop switch. No unconditional native hook is installed; existing clients must load the updated rules. |
+| Codex tasks in existing projects | **Implemented; iPhone tasks and Git flow verified** | Separate `/codex` page, registered projects and persisted results. A Remote-only permission profile permits project Git writes and HTTPS origin access. BrainApp's Clock Gap commit/push completed through the web. Existing desktop chat continuation is not implemented. |
+| Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
+| Signed deployment | **Implemented; restart verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses installation while jobs are active. Documents permission survived reinstall; unattended self-update from a web job is not implemented. |
+| Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
 | Alternate ingress path | **Planned** | No Headscale, alternate overlay, reverse HTTPS tunnel, or managed access proxy is configured |
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-The current Remote test suite contains 42 passing tests. Production HTTPS, PWA installation, push delivery, restart persistence, LTE/Wi-Fi access, and iPhone approval responses have also been exercised manually for the original Claude flow. Codex routing and new project controls need their own iPhone acceptance check.
+Updated 3 November 2026. The last committed baseline is `4f308a6` (`Usage upd`);
+channel switching and latest-chat continuation are installed from the current uncommitted worktree. The current Remote test suite contains 53 passing
+tests. The installed HTTP server was built with native SwiftPM in debug configuration;
+a release build of this latest baseline remains a separate validation item.
+Local health, bundled assets and SQLite checks passed. iPhone usage reports,
+duplicate-card suppression, task disclosure controls, Codex tasks and the BrainApp
+Git flow were verified. Full stop/restart, cancellation and concurrent-agent
+acceptance coverage remains incomplete.
 
-For the planned channel-based mode switch, only a new user message changes mode;
+## Remaining product work
+
+### Implemented: continue the latest working chat in a selected project
+
+- Both pages default to the latest working chat by activity, scoped by provider
+  and canonical registered project, excluding archived, diagnostic and subagent chats.
+- Claude project choices use the names of chats currently open in Cursor and
+  retain their exact session IDs; unopened registered projects remain available
+  for explicit new chats.
+- The form shows its title/date/ID before sending and pins that ID in SQLite;
+  an explicit new-chat option remains. Missing targets fail without a silent fork.
+- Native Codex `exec resume` and closed-chat Claude `--resume` preserve provider
+  history. An open Cursor chat receives the request through Claude Code's supported
+  cross-session `SendMessage`; Remote reads its next non-empty final `end_turn`
+  through the public Agent SDK and returns it to the iPhone task page.
+- Busy jobs retain their target and retry after five seconds without blocking
+  other ready jobs. An open but `idle` Cursor chat is available to Remote; only an
+  owner reporting `busy` waits. Codex uses its native writer lock at launch because
+  app-server `active` also means a chat is merely loaded. Claude ownership is checked
+  before delivery. The open-Cursor response collector has a 30-minute deadline.
+- Claude web jobs explicitly state that Remote was enabled atomically at acceptance,
+  preventing resumed chat context from reporting an obsolete disabled state or
+  applying the desktop channel reset inside `REMOTE_MESSAGE_CHANNEL=web`.
+- Claude discovery uses public Agent SDK 0.3.316 metadata functions, with a pinned
+  Node support package outside the repo; Codex uses public app-server metadata.
+- RemoteApproval now executes in MCP_server; the legacy directory is a read-only
+  history lookup alias. Context and permissions remain provider/project scoped.
+- Tests cover target pinning, foreign projects, diagnostics, busy owners, queue
+  fairness, restart and actual session IDs. Form checks passed for stale fetches,
+  retained drafts, exact submitted IDs and explicit new-chat behavior. A production
+  HTTP acceptance test delivered into `artesia-ios-77` and returned
+  `REMOTE_CURSOR_E2E_OK`; manual visual confirmation on the iPhone remains.
+- The signed installer replaces resource bundles as a unit, preventing stale
+  Contents/Resources assets from shadowing a newer native SwiftPM flat bundle.
+
+1. **Task visibility and recovery.** Stream progress into web task cards; distinguish
+   running, waiting for a human, blocked by permissions, cancelled and interrupted.
+   Add a controlled stop action and document queue behavior.
+2. **Controlled server updates.** A web job cannot replace its own host server:
+   its sandbox forbids the Remote runtime directory and the installer rejects active
+   jobs. Design a separate, explicitly authorized update path that drains the queue,
+   preserves signing and supports rollback without granting broad writes to agents.
+3. **Desktop lifecycle verification.** Channel switching is implemented with an
+   authoritative HTTP entrypoint and instruction-driven desktop preflight. Verify
+   updated instructions in all existing Claude/Cursor chats. A deterministic native
+   desktop callback remains a future improvement; do not attach a blanket
+   `UserPromptSubmit` mode-reset hook to synthetic/background events.
+4. **Chat selection and new projects.** Add a picker for any existing chat beyond
+   the implemented latest-chat continuation. Separately support creating a project
+   under an allowlisted parent directory.
+5. **Long-running approvals.** Investigate asynchronous resumption after the current
+   wait expires, including restart/recovery; do not simply lengthen the timeout
+   without confirming client behavior.
+6. **Security hardening.** Follow the deferred track below, starting with Claude's
+   permission bypass and per-device sessions. Complete the gate before public/shared ingress.
+7. **Transport independence.** Finish application/ingress diagnostics, then test an
+   alternate path, stable origin and any carrier-restriction fallback in staging.
+
+For channel-based mode switching, only a new direct user message changes mode;
 page views, polling, push receipts, tool output, and background task progress must not
 change it. Mode remains independent per agent, and explicit start/stop commands take
-precedence over channel defaults. Web submission must enable mode before the current
-disabled-mode guard rejects the request. Test duplicate messages, switching while a
-task is running, and independent Claude/Codex modes before enabling this behavior.
+precedence over channel defaults. Web submission stores mode and job atomically
+after validation. Tests cover invalid submissions, explicit overrides, rollback,
+independent agents, queued-worker behavior and child process markers. The desktop
+helper is tested independently of the model; automatic client compliance still
+depends on the client reading and following the installed global instructions.
 
 ## Important origin constraint
 

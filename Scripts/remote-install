@@ -83,10 +83,12 @@ def main():
         if destination.exists():
             shutil.copy2(destination, backup / args.product)
         installed_bundle = destination.parent / bundle.name
-        if installed_bundle.exists():
-            run("/usr/bin/ditto", str(installed_bundle), str(backup / bundle.name))
         ensure_idle()
-        run("/usr/bin/ditto", str(stage / bundle.name), str(installed_bundle))
+        # Replace the bundle as a unit. Merging a native SwiftPM flat bundle into
+        # an older Contents/Resources bundle leaves stale assets shadowing new ones.
+        if installed_bundle.exists():
+            os.replace(installed_bundle, backup / bundle.name)
+        os.replace(stage / bundle.name, installed_bundle)
         os.replace(signed, destination)
         run("/usr/bin/codesign", "--verify", "--strict", str(destination))
         print("Installed signed binary. Backup:", backup)

@@ -97,8 +97,22 @@ if [[ "${2:-}" == "--agent" ]]; then
     case "$remote_agent" in codex|claude) ;; *) echo "Choose codex or claude." >&2; exit 64 ;; esac
     case "${1:-}" in
         start) start_remote ;;
+        desktop)
+            # Called only for an actual desktop user message, not a generic lifecycle hook.
+            # A queued web worker must never undo a newer desktop/web mode decision.
+            if [[ "${REMOTE_MESSAGE_CHANNEL:-}" == "web" ]]; then
+                echo "Web worker: Remote mode unchanged."
+                exit 0
+            fi
+            current_mode=$("$HOME/Library/Application Support/Remote/bin/RemoteMCPServer" --agent-mode "$remote_agent" status)
+            if [[ "$current_mode" == "$remote_agent: enabled" ]]; then
+                exec "$HOME/Library/Application Support/Remote/bin/RemoteMCPServer" --agent-mode "$remote_agent" stop
+            fi
+            echo "$current_mode"
+            exit 0
+            ;;
         stop|status) ;;
-        *) echo "Agent mode supports start, stop, status." >&2; exit 64 ;;
+        *) echo "Agent mode supports start, stop, status, desktop." >&2; exit 64 ;;
     esac
     exec "$HOME/Library/Application Support/Remote/bin/RemoteMCPServer" --agent-mode "$remote_agent" "$1"
 fi

@@ -45,7 +45,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
 
     public func setRemoteMode(agent: String, enabled: Bool) async throws {
         try await dbQueue.write { db in
-            try db.execute(sql: "INSERT INTO remote_agent_modes (agent, enabled) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET enabled = excluded.enabled",
+            try db.execute(sql: "INSERT INTO remote_agent_modes (agent, enabled) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET enabled = excluded.enabled WHERE remote_agent_modes.enabled != excluded.enabled",
                            arguments: [agent, enabled])
         }
     }
@@ -200,6 +200,10 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         try await insertClaudeJob(job, ifAbsent: false)
     }
 
+    public func createWebJob(_ job: RemoteClaudeJob, remoteEnabled: Bool) async throws {
+        try await insertClaudeJob(job, ifAbsent: false, remoteEnabled: remoteEnabled)
+    }
+
     /// A cached usage snapshot has one UUID, including simultaneous/retried HTTP requests.
     public func saveUsageJobIfAbsent(_ job: RemoteClaudeJob) async throws -> RemoteClaudeJob {
         try await insertClaudeJob(job, ifAbsent: true)
@@ -207,8 +211,12 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         return saved
     }
 
-    private func insertClaudeJob(_ job: RemoteClaudeJob, ifAbsent: Bool) async throws {
+    private func insertClaudeJob(_ job: RemoteClaudeJob, ifAbsent: Bool, remoteEnabled: Bool? = nil) async throws {
         try await dbQueue.write { db in
+            if let remoteEnabled {
+                try db.execute(sql: "INSERT INTO remote_agent_modes (agent, enabled) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET enabled = excluded.enabled WHERE remote_agent_modes.enabled != excluded.enabled",
+                               arguments: [job.agent, remoteEnabled])
+            }
             try db.execute(
                 sql: """
                 INSERT INTO remote_claude_jobs (
@@ -237,6 +245,20 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
     public func claudeJob(id: UUID) async throws -> RemoteClaudeJob? {
         try await dbQueue.read { db in
             try Self.fetchClaudeJob(db: db, id: id)
+        }
+    }
+
+    public func conversationSessionIDs(agent: String, project: String) async throws -> [String] {
+        try await dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT DISTINCT session_id FROM remote_claude_jobs WHERE agent = ? AND working_directory = ? AND session_id IS NOT NULL AND prompt != 'Usage'",
+                                arguments: [agent, project])
+        }
+    }
+
+    public func deferBusyConversation(id: UUID, until: Date) async throws {
+        try await dbQueue.write { db in
+            try db.execute(sql: "UPDATE remote_claude_jobs SET status = 'queued', started_at = NULL, not_before = ?, error_message = ? WHERE id = ? AND status = 'running'",
+                           arguments: [until.timeIntervalSince1970, RemoteConversationError.busy.localizedDescription, id.uuidString])
         }
     }
 
@@ -279,11 +301,11 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 db,
                 sql: """
                 SELECT * FROM remote_claude_jobs
-                WHERE status = ?
+                WHERE status = ? AND (not_before IS NULL OR not_before <= ?)
                 ORDER BY created_at ASC
                 LIMIT 1
                 """,
-                arguments: [RemoteClaudeJobStatus.queued.rawValue]
+                arguments: [RemoteClaudeJobStatus.queued.rawValue, startedAt.timeIntervalSince1970]
             ) else {
                 return nil
             }
@@ -889,6 +911,11 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             }
             try db.alter(table: "remote_claude_jobs") { table in
                 table.add(column: "agent", .text).notNull().defaults(to: "claude")
+            }
+        }
+        migrator.registerMigration("addRemoteConversationRetry") { db in
+            try db.alter(table: "remote_claude_jobs") { table in
+                table.add(column: "not_before", .double)
             }
         }
         return migrator

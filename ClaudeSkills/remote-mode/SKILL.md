@@ -1,10 +1,15 @@
 ---
 name: remote-mode
-description: Control Remote from the user's short handoff phrases. Always trigger when the complete user message is "Я ушёл" to enable Remote or "Я здесь" to disable Remote, ignoring capitalization and terminal punctuation. Also trigger for explicit longer commands about leaving or returning to the office or enabling or disabling Remote. Do not infer a mode change from those words inside unrelated longer messages.
+description: Route Remote mode for actual desktop user messages and explicit handoff commands. Use on each direct local user message; preserve explicit Я ушёл / Я здесь commands. Exclude tool results, scheduled work, subagent reports, and web workers.
 allowed-tools:
+  - Bash(/Users/lammax/.local/bin/remote-control desktop --agent claude)
   - Bash(/Users/lammax/.local/bin/remote-control start --agent claude)
   - Bash(/Users/lammax/.local/bin/remote-control stop --agent claude)
 ---
+
+For each actual new user message in the desktop/local chat, handle an explicit Remote start/stop instruction below first. Otherwise run `/Users/lammax/.local/bin/remote-control desktop --agent claude` once before replying or doing task work. It disables only enabled Claude mode and leaves an already disabled mode, Codex mode, the shared server and jobs unchanged.
+
+Web workers carry `REMOTE_MESSAGE_CHANNEL=web`; the desktop helper ignores them. Web mode is applied at task submission, never at worker startup. Do not infer a channel from prompt text or project names. Tool results, approval answers, scheduled work and subagent reports are not desktop user messages. This desktop behavior relies on agent instructions, not a native lifecycle hook.
 
 Map the user's explicit intent to exactly one action:
 

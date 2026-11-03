@@ -6,6 +6,272 @@ import XCTVapor
 @testable import Shared
 
 final class RemoteTests: XCTestCase {
+    func testConversationCatalogScopesProjectAndSortsActivity() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let old = RemoteConversation(id: UUID().uuidString, title: "Old", project: path, updatedAt: 10, busy: false)
+        let recent = RemoteConversation(id: UUID().uuidString, title: "Recent", project: path, updatedAt: 20, busy: false)
+        let foreign = RemoteConversation(id: UUID().uuidString, title: "Other", project: "/other", updatedAt: 30, busy: false)
+        let catalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [old, foreign, recent]),
+                                               repository: fixture.repository, projects: [RemoteProject(name: "Test", path: path)])
+        let rows = try await catalog.list(agent: "codex", project: path)
+        XCTAssertEqual(rows.map(\.id), [recent.id, old.id])
+        do { _ = try await catalog.validate(agent: "codex", project: path, id: foreign.id); XCTFail("Cross-project continuation") }
+        catch RemoteConversationError.missing {}
+    }
+
+    func testCodexCatalogExcludesUnregisteredExecAndDiagnostics() throws {
+        let normal = UUID().uuidString, known = UUID().uuidString, diagnostic = UUID().uuidString
+        let rows: [[String: Any]] = [
+            ["id": normal, "cwd": "/project", "updatedAt": 2.0, "source": "vscode", "name": "Work"],
+            ["id": known, "cwd": "/project", "updatedAt": 3.0, "source": "exec"],
+            ["id": diagnostic, "cwd": "/project", "updatedAt": 5.0, "source": ["custom": "remote-diagnostic"]],
+            ["id": UUID().uuidString, "cwd": "/project", "updatedAt": 6.0, "source": "exec"],
+            ["id": UUID().uuidString, "cwd": "/project", "updatedAt": 7.0, "source": "subAgent"]
+        ]
+        let result = try RemoteCLIConversationsReader.decodeCodex(JSONSerialization.data(withJSONObject: ["data": rows]),
+                                                                  knownRemoteIDs: [known, diagnostic])
+        XCTAssertEqual(Set(result.map(\.id)), [normal, known])
+    }
+
+    func testClaudeUsesOpenCursorChatNamesAndKeepsUnopenedProjects() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let openPath = fixture.directory.resolvingSymlinksInPath().path
+        let otherURL = fixture.directory.appendingPathComponent("Other", isDirectory: true)
+        try FileManager.default.createDirectory(at: otherURL, withIntermediateDirectories: false)
+        let otherPath = otherURL.resolvingSymlinksInPath().path
+        let openID = UUID().uuidString
+        let catalog = RemoteConversationCatalog(
+            reader: TestConversationReader(rows: [
+                .init(id: openID, title: "artesia-ios-ed", project: openPath, updatedAt: 20, busy: false, open: true),
+                .init(id: UUID().uuidString, title: "Closed summary", project: otherPath, updatedAt: 30, busy: false)
+            ]),
+            repository: fixture.repository,
+            projects: [RemoteProject(name: "Static Artesia", path: openPath), RemoteProject(name: "Other", path: otherPath)]
+        )
+
+        let choices = try await catalog.projectChoices(agent: "claude")
+        XCTAssertEqual(choices, [
+            RemoteProjectChoice(name: "artesia-ios-ed", path: openPath, sessionID: openID),
+            RemoteProjectChoice(name: "Other", path: otherPath)
+        ])
+    }
+
+    func testClaudeOwnerMetadataOverridesStoredSessionTitle() throws {
+        let path = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        let id = UUID().uuidString
+        let merged = try RemoteCLIConversationsReader.mergeClaudeOwners(
+            sessions: [.init(id: id, title: "Generated SDK summary", project: path, updatedAt: 42, busy: false)],
+            activeRows: [["sessionId": id, "cwd": path, "name": "Cursor chat title", "startedAt": 1_000]],
+            projects: [path]
+        )
+        XCTAssertEqual(merged, [.init(id: id, title: "Cursor chat title", project: path, updatedAt: 42, busy: false, open: true)])
+
+        let busy = try RemoteCLIConversationsReader.mergeClaudeOwners(
+            sessions: merged,
+            activeRows: [["sessionId": id, "cwd": path, "name": "Cursor chat title", "status": "busy"]],
+            projects: [path]
+        )
+        XCTAssertTrue(try XCTUnwrap(busy.first).busy)
+    }
+
+    func testContinuationPinsRequestedIDAndRejectsForeignID() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let target = RemoteConversation(id: UUID().uuidString, title: "Shown before enqueue", project: path, updatedAt: 10, busy: false)
+        let newer = RemoteConversation(id: UUID().uuidString, title: "Newer", project: path, updatedAt: 20, busy: false)
+        let catalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [target, newer]),
+            repository: fixture.repository, projects: [RemoteProject(name: "Test", path: path)])
+        let jobs = RemoteClaudeJobService(repository: fixture.repository, runner: StubClaudeRunner(), workingDirectory: path)
+        let app = try await Application.make(.testing)
+        configureApprovalHTTPRoutes(app: app, service: fixture.service,
+            authorization: ApprovalHTTPAuthorization(token: fixture.token), claudeService: jobs,
+            agentRepository: fixture.repository, projects: [RemoteProject(name: "Test", path: path)], conversations: catalog)
+        defer { Task { try? await app.asyncShutdown() } }
+        let unauth = try await app.sendRequest(.GET, "/api/remote/conversations?agent=codex&project=" + path)
+        XCTAssertEqual(unauth.status, .unauthorized)
+        var headers = HTTPHeaders(); headers.bearerAuthorization = .init(token: fixture.token); headers.contentType = .json
+        func payload(_ id: String) throws -> ByteBuffer {
+            byteBuffer(String(decoding: try JSONEncoder().encode(["prompt":"Continue", "project":path,
+                "conversation":"latest", "sessionID":id]), as: UTF8.self))
+        }
+        let invalid = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: payload(UUID().uuidString))
+        XCTAssertEqual(invalid.status, .conflict)
+        let before = try await fixture.repository.recentClaudeJobs(limit: 10)
+        XCTAssertTrue(before.isEmpty)
+        let accepted = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: payload(target.id))
+        XCTAssertEqual(accepted.status, .ok)
+        let response = try accepted.content.decode(RemoteClaudeJobResponse.self)
+        XCTAssertEqual(response.sessionID, target.id)
+    }
+
+    func testBusyConversationDefersWithoutBlockingOtherJobsAndKeepsTargetOnRestart() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let now = Date(), target = UUID().uuidString
+        let waiting = RemoteClaudeJob(id: UUID(), prompt: "Continue", workingDirectory: fixture.directory.path,
+                                     status: .queued, sessionID: target, createdAt: now, agent: "codex")
+        try await fixture.repository.createClaudeJob(waiting)
+        _ = try await fixture.repository.claimNextClaudeJob(startedAt: now)
+        try await fixture.repository.deferBusyConversation(id: waiting.id, until: now.addingTimeInterval(60))
+        let next = RemoteClaudeJob(id: UUID(), prompt: "Other", workingDirectory: fixture.directory.path,
+                                  status: .queued, createdAt: now.addingTimeInterval(1))
+        try await fixture.repository.createClaudeJob(next)
+        let runnable = try await fixture.repository.claimNextClaudeJob(startedAt: now.addingTimeInterval(2))
+        XCTAssertEqual(runnable?.id, next.id)
+        try await fixture.repository.completeClaudeJob(id: next.id, result: .init(response: "Done", sessionID: nil), completedAt: now)
+        let path = await fixture.repository.path
+        let reopened = try SQLiteApprovalRepository(path: path)
+        try await reopened.requeueInterruptedClaudeJobs()
+        let resumed = try await reopened.claimNextClaudeJob(startedAt: now.addingTimeInterval(61))
+        XCTAssertEqual(resumed?.id, waiting.id)
+        XCTAssertEqual(resumed?.sessionID, target)
+    }
+    func testResumedRunnerUsesPinnedSessionAndRejectsBusyOwner() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let id = UUID().uuidString
+        let script = fixture.directory.appendingPathComponent("resume-probe")
+        try """
+        #!/bin/sh
+        resumed=no
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "resume" ]; then shift; [ "$1" = "\(id)" ] || exit 9; resumed=yes; fi
+          if [ "$1" = "--output-last-message" ]; then shift; output="$1"; fi
+          shift
+        done
+        [ "$resumed" = yes ] || exit 8
+        printf '%s' 'Retained' > "$output"
+        printf '{"type":"thread.started","thread_id":"\(id)"}\\n'
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let project = RemoteProject(name: "Test", path: path)
+        let job = RemoteClaudeJob(id: UUID(), prompt: "Continue", workingDirectory: path,
+                                 status: .running, sessionID: id, createdAt: Date(), agent: "codex")
+        for busy in [false, true] {
+            let catalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [
+                .init(id: id, title: "Existing", project: path, updatedAt: 1, busy: busy)
+            ]), repository: fixture.repository, projects: [project])
+            let runner = RemoteAgentRunner(claude: ClaudeCLIRunner(executablePath: script.path), codexPath: script.path,
+                                           projects: [project], conversations: catalog)
+            do {
+                let result = try await runner.run(job: job)
+                XCTAssertFalse(busy)
+                XCTAssertEqual(result.sessionID, id)
+                XCTAssertEqual(result.response, "Retained")
+            } catch RemoteConversationError.busy { XCTAssertTrue(busy) }
+        }
+    }
+
+    func testChannelDefaultsAndExplicitCommands() {
+        XCTAssertTrue(RemoteModePolicy.enabled(channel: .web, prompt: "Build"))
+        XCTAssertFalse(RemoteModePolicy.enabled(channel: .desktop, prompt: "Build"))
+        XCTAssertTrue(RemoteModePolicy.enabled(channel: .desktop, prompt: "Я УШЁЛ!"))
+        XCTAssertFalse(RemoteModePolicy.enabled(channel: .web, prompt: "Я здесь."))
+        XCTAssertTrue(RemoteModePolicy.enabled(channel: .desktop, prompt: "/remote-start"))
+        XCTAssertFalse(RemoteModePolicy.enabled(channel: .web, prompt: "/remote-stop"))
+        XCTAssertFalse(RemoteModePolicy.enabled(channel: .desktop, prompt: "В тексте написано Я ушёл"))
+    }
+
+    func testWebModeAndJobAreAtomicAndDoNotAffectOtherAgent() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        try await fixture.repository.setRemoteMode(agent: "claude", enabled: false)
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: false)
+        let job = RemoteClaudeJob(id: UUID(), prompt: "Web", workingDirectory: fixture.directory.path,
+                                 status: .queued, createdAt: Date(), agent: "codex")
+        try await fixture.repository.createWebJob(job, remoteEnabled: true)
+        var modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, true)
+        XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, false)
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: false)
+        do {
+            try await fixture.repository.createWebJob(job, remoteEnabled: true)
+            XCTFail("Duplicate insert must fail and roll back the mode write")
+        } catch {}
+        modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, false)
+        let queued = try await fixture.repository.claudeJob(id: job.id)
+        XCTAssertEqual(queued?.status, .queued)
+        _ = try await fixture.repository.claimNextClaudeJob(startedAt: Date())
+        modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, false,
+                       "A queued worker must not override a newer desktop message")
+    }
+
+    func testClaudeWebMessageEnablesModeAndExplicitStopWins() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: false)
+        try await fixture.repository.setRemoteMode(agent: "claude", enabled: false)
+        let jobs = RemoteClaudeJobService(repository: fixture.repository, runner: StubClaudeRunner(),
+                                         workingDirectory: fixture.directory.path)
+        let app = try await Application.make(.testing)
+        configureApprovalHTTPRoutes(app: app, service: fixture.service,
+                                    authorization: ApprovalHTTPAuthorization(token: fixture.token),
+                                    claudeService: jobs, agentRepository: fixture.repository)
+        defer { Task { try? await app.asyncShutdown() } }
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        _ = try await app.sendRequest(.GET, "/claude", headers: headers)
+        _ = try await app.sendRequest(.GET, "/claude/jobs", headers: headers)
+        var modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, false)
+        headers.contentType = .json
+        let accepted = try await app.sendRequest(.POST, "/claude/jobs", headers: headers,
+                                                body: byteBuffer(#"{"prompt":"Test"}"#))
+        XCTAssertEqual(accepted.status, .ok)
+        modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, true)
+        XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, false)
+        let stopped = try await app.sendRequest(.POST, "/claude/jobs", headers: headers,
+                                               body: byteBuffer(#"{"prompt":"Я здесь"}"#))
+        XCTAssertEqual(stopped.status, .ok)
+        modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, false)
+    }
+
+    func testBothWebRunnersMarkChildChannel() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let claudeScript = fixture.directory.appendingPathComponent("claude-probe")
+        try """
+        #!/bin/sh
+        for argument in "$@"; do last="$argument"; done
+        case "$last" in
+          *"Remote mode for Claude was enabled atomically"*"User request:"*) ;;
+          *) exit 12 ;;
+        esac
+        printf '{"result":"%s"}' "$REMOTE_MESSAGE_CHANNEL"
+        """.write(to: claudeScript, atomically: true, encoding: .utf8)
+        let codexScript = fixture.directory.appendingPathComponent("codex-probe")
+        try """
+        #!/bin/sh
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--output-last-message" ]; then shift; output="$1"; break; fi
+            shift
+        done
+        printf '%s' "$REMOTE_MESSAGE_CHANNEL" > "$output"
+        printf '{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000001"}\\n'
+        """.write(to: codexScript, atomically: true, encoding: .utf8)
+        for path in [claudeScript, codexScript] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path)
+        }
+        let runner = RemoteAgentRunner(claude: ClaudeCLIRunner(executablePath: claudeScript.path),
+                                       codexPath: codexScript.path,
+                                       projects: [RemoteProject(name: "Test", path: fixture.directory.path)])
+        for agent in ["claude", "codex"] {
+            let job = RemoteClaudeJob(id: UUID(), prompt: "Probe", workingDirectory: fixture.directory.path,
+                                      status: .running, createdAt: Date(), agent: agent)
+            let result = try await runner.run(job: job)
+            XCTAssertEqual(result.response, "web")
+        }
+    }
+
     func testUsageParsersPreserveMissingValuesAndExcludeLocalAnalytics() throws {
         let report = try RemoteCLIUsageReader.codexText(Data(#"{"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":300},"secondary":{"windowDurationMins":10080}},"rateLimitsByLimitId":{}}"#.utf8))
         XCTAssertTrue(report.contains("осталось 100%"))
@@ -135,7 +401,7 @@ final class RemoteTests: XCTestCase {
         XCTAssertThrowsError(try RemoteProject.resolve(directory.appendingPathComponent("..").path, in: projects))
     }
 
-    func testCodexHTTPRequiresAuthenticationModeAndRegisteredProject() async throws {
+    func testCodexHTTPEnablesModeOnlyAfterValidAuthenticatedMessage() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
         let app = try await Application.make(.testing)
@@ -157,17 +423,26 @@ final class RemoteTests: XCTestCase {
         ))
         headers.contentType = .json
         let body = byteBuffer(String(decoding: try JSONEncoder().encode(["prompt": "Test", "project": fixture.directory.path]), as: UTF8.self))
-        let disabled = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: body)
-        XCTAssertEqual(disabled.status, .conflict)
-        try await fixture.repository.setRemoteMode(agent: "codex", enabled: true)
+        try await fixture.repository.setRemoteMode(agent: "codex", enabled: false)
+        try await fixture.repository.setRemoteMode(agent: "claude", enabled: false)
+        let rejected = try await app.sendRequest(.POST, "/codex/jobs", body: body)
+        XCTAssertEqual(rejected.status, .forbidden)
         let unregistered = try await app.sendRequest(.POST, "/codex/jobs", headers: headers,
             body: byteBuffer(#"{"prompt":"Test","project":"/"}"#))
         XCTAssertEqual(unregistered.status, .badRequest)
+        let empty = try await app.sendRequest(.POST, "/codex/jobs", headers: headers,
+            body: byteBuffer(String(decoding: try JSONEncoder().encode(["prompt": "   ", "project": fixture.directory.path]), as: UTF8.self)))
+        XCTAssertEqual(empty.status, .badRequest)
+        let unchanged = try await fixture.repository.remoteModes()
+        XCTAssertEqual(unchanged.first { $0.agent == "codex" }?.enabled, false)
         let accepted = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: body)
         XCTAssertEqual(accepted.status, .ok)
         let job = try accepted.content.decode(RemoteClaudeJobResponse.self)
         XCTAssertEqual(job.agent, "codex")
         XCTAssertEqual(job.workingDirectory, fixture.directory.resolvingSymlinksInPath().path)
+        let modes = try await fixture.repository.remoteModes()
+        XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, true)
+        XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, false)
     }
     func testPushMigrationPreservesExistingApprovalsAndClaudeJobs() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -1163,6 +1438,7 @@ final class RemoteTests: XCTestCase {
     }
 
     func testPWAResourcesHaveExpectedContentTypesAndScope() async throws {
+        XCTAssertNotNil(RemoteBundledResource.url(name: "claude-sessions", extension: "mjs"))
         let fixture = try makeFixture()
         defer { fixture.remove() }
         let app = try await makeApplication(service: fixture.service, token: fixture.token)
@@ -1432,6 +1708,11 @@ private actor TestUsageReader: RemoteUsageReading {
     }
 }
 
+private struct TestConversationReader: RemoteConversationsReading {
+    let rows: [RemoteConversation]
+    func list(agent: String, projects: [String], knownRemoteIDs: Set<String>) async throws -> [RemoteConversation] { rows }
+}
+
 private struct Fixture: Sendable {
     let service: ApprovalService
     let repository: SQLiteApprovalRepository
@@ -1448,7 +1729,7 @@ private struct StubClaudeRunner: RemoteClaudeJobRunning {
         try await Task.sleep(for: .milliseconds(10))
         return RemoteClaudeJobResult(
             response: "Done: \(job.prompt)",
-            sessionID: "stub-session"
+            sessionID: job.sessionID ?? "stub-session"
         )
     }
 }

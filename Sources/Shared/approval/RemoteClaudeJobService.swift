@@ -23,7 +23,7 @@ public actor RemoteClaudeJobService {
         startWorkerIfNeeded()
     }
 
-    public func submit(prompt: String, now: Date = Date(), agent: String = "claude", project: String? = nil) async throws -> RemoteClaudeJob {
+    public func submit(prompt: String, now: Date = Date(), agent: String = "claude", project: String? = nil, fromWeb: Bool = false, sessionID: String? = nil) async throws -> RemoteClaudeJob {
         let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedPrompt.isEmpty else { throw RemoteClaudeJobError.emptyPrompt }
         guard normalizedPrompt.count <= Self.maximumPromptLength else {
@@ -35,10 +35,15 @@ public actor RemoteClaudeJobService {
             prompt: normalizedPrompt,
             workingDirectory: project ?? workingDirectory,
             status: .queued,
+            sessionID: sessionID,
             createdAt: now,
             agent: agent
         )
-        try await repository.createClaudeJob(job)
+        if fromWeb {
+            try await repository.createWebJob(job, remoteEnabled: RemoteModePolicy.enabled(channel: .web, prompt: normalizedPrompt))
+        } else {
+            try await repository.createClaudeJob(job)
+        }
         startWorkerIfNeeded()
         return job
     }
@@ -70,6 +75,8 @@ public actor RemoteClaudeJobService {
                         result: result,
                         completedAt: Date()
                     )
+                } catch RemoteConversationError.busy {
+                    try await repository.deferBusyConversation(id: job.id, until: Date().addingTimeInterval(5))
                 } catch {
                     let message = (error as? LocalizedError)?.errorDescription
                         ?? String(describing: error)
