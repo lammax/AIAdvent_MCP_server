@@ -171,6 +171,13 @@ public func configureApprovalHTTPRoutes(
             )
             return RemoteClaudeJobResponse(try await agentRepository.saveUsageJobIfAbsent(job))
         }
+        app.delete(.constant(agent), "jobs") { request async throws -> RemoteJobHistoryClearResponse in
+            try requireMutationAuthorization(request, authorization: authorization)
+            guard let claudeService else { throw Abort(.notFound) }
+            return RemoteJobHistoryClearResponse(
+                cleared: try await claudeService.clearFinishedHistory(agent: agent)
+            )
+        }
     }
 
     app.get("api", "remote", "modes") { request async throws -> [RemoteAgentMode] in
@@ -654,6 +661,14 @@ public struct RemoteClaudeJobListResponse: Content, Sendable {
     }
 }
 
+public struct RemoteJobHistoryClearResponse: Content, Sendable {
+    public let cleared: Int
+
+    public init(cleared: Int) {
+        self.cleared = cleared
+    }
+}
+
 public struct RemoteClaudeJobResponse: Content, Sendable {
     public let agent: String
     public let id: UUID
@@ -1082,6 +1097,10 @@ private enum ApprovalWebPage {
                 <p id="composer-message" class="muted" aria-live="polite"></p>
               </form>
             </section>
+            <section class="history-toolbar" aria-label="История запросов">
+              <p id="history-message" class="muted" aria-live="polite"></p>
+              <button id="clear-history" class="secondary danger" type="button">Очистить историю</button>
+            </section>
             <section id="jobs" class="job-list" aria-live="polite"><div class="card"><p class="muted">Loading…</p></div></section>
           </main>
           <script>
@@ -1098,6 +1117,8 @@ private enum ApprovalWebPage {
           const composerMessage = document.getElementById('composer-message');
           const jobsState = document.getElementById('jobs');
           const usageButton = document.getElementById('usage');
+          const clearHistoryButton = document.getElementById('clear-history');
+          const historyMessage = document.getElementById('history-message');
           usageButton.addEventListener('click', async () => {
             usageButton.disabled = true;
             usageButton.textContent = 'Загрузка…';
@@ -1243,6 +1264,7 @@ private enum ApprovalWebPage {
           function renderJobs(jobs) {
             outputObserver.disconnect();
             jobsState.replaceChildren();
+            clearHistoryButton.disabled = !jobs.some(job => job.status === 'completed' || job.status === 'failed');
             if (!jobs.length) {
               const empty = node('div', 'card');
               empty.append(node('p', 'empty', 'No Claude requests yet'));
@@ -1271,6 +1293,31 @@ private enum ApprovalWebPage {
               jobsState.append(article);
             });
           }
+
+          clearHistoryButton.addEventListener('click', async () => {
+            if (!window.confirm('Скрыть завершённые и неудачные запросы? Активные задачи останутся.')) return;
+            clearHistoryButton.disabled = true;
+            historyMessage.textContent = 'Очищаю историю…';
+            try {
+              const response = await fetch('/claude/jobs', {
+                method: 'DELETE', credentials: 'same-origin',
+                headers: { 'X-CSRF-Token': csrfToken }
+              });
+              if (response.status === 401) { window.location = '/login'; return; }
+              if (!response.ok) throw new Error();
+              const result = await response.json();
+              expandedJobOutputs.clear();
+              try { sessionStorage.removeItem('remote-expanded-outputs'); } catch (_) {}
+              renderedJobs = null;
+              await loadJobs();
+              historyMessage.textContent = result.cleared
+                ? 'История очищена.'
+                : 'Завершённых запросов для очистки нет.';
+            } catch (_) {
+              historyMessage.textContent = 'Не удалось очистить историю. Повторите попытку.';
+              clearHistoryButton.disabled = false;
+            }
+          });
 
           form.addEventListener('submit', async (event) => {
             event.preventDefault();
@@ -1343,6 +1390,9 @@ private enum ApprovalWebPage {
     button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; overflow-wrap: anywhere; }
     button:disabled { opacity: .55; }
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
+    button.secondary.danger { background: #fee2e2; color: #991b1b; }
+    .history-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin: 18px 0 12px; }
+    .history-toolbar .muted { flex: 1; margin: 0; }
     .action-link { display: inline-flex; align-items: center; min-height: 42px; border-radius: 13px; padding: 10px 14px; background: #e2e8f0; color: #1e293b; font-weight: 750; text-decoration: none; }
     .approval + .approval { border-top: 1px solid #e2e8f0; margin-top: 24px; padding-top: 24px; }
     .approval.targeted { border-radius: 14px; outline: 3px solid #60a5fa; outline-offset: 8px; }

@@ -16,6 +16,7 @@ public protocol RemoteClaudeJobRepository: Sendable {
     ) async throws
     func claudeJob(id: UUID) async throws -> RemoteClaudeJob?
     func recentClaudeJobs(limit: Int) async throws -> [RemoteClaudeJob]
+    func hideFinishedClaudeJobs(agent: String, at: Date) async throws -> Int
     func requeueInterruptedClaudeJobs() async throws
     func claimNextClaudeJob(startedAt: Date) async throws -> RemoteClaudeJob?
     func completeClaudeJob(

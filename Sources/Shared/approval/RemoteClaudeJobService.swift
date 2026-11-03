@@ -56,6 +56,10 @@ public actor RemoteClaudeJobService {
         try await repository.claudeJob(id: id)
     }
 
+    public func clearFinishedHistory(agent: String, now: Date = Date()) async throws -> Int {
+        try await repository.hideFinishedClaudeJobs(agent: agent, at: now)
+    }
+
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
         worker = Task { await runQueue() }

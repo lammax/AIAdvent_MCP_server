@@ -171,9 +171,19 @@ private enum CodexThreadHistoryReader {
                   items.contains(where: { Self.userMessage($0, contains: marker) }) else { continue }
             let status = turn["status"] as? String ?? ""
             if status == "inProgress" { return .running }
-            if status == "failed" || status == "interrupted" {
+            if status == "failed" {
                 let error = (turn["error"] as? [String: Any])?["message"] as? String
                 return .failed(error ?? "Codex turn \(status).")
+            }
+            if status == "interrupted" {
+                let error = (turn["error"] as? [String: Any])?["message"] as? String
+                if let error, !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return .failed(error)
+                }
+                // A separate read-only app-server reconstructs an unfinished persisted turn as
+                // interrupted while the desktop owner is still running it. Keep polling: once
+                // the owner writes task_complete, the same turn becomes completed.
+                return .running
             }
             guard status == "completed" else { return .running }
             let answer = items.reversed().compactMap { item -> String? in

@@ -21,6 +21,47 @@ final class RemoteTests: XCTestCase {
         catch RemoteConversationError.missing {}
     }
 
+    func testClearingRemoteHistoryHidesOnlyFinishedJobsAndPreservesSessions() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let now = Date()
+        let completedSession = UUID().uuidString
+        let completed = RemoteClaudeJob(
+            id: UUID(), prompt: "Done", workingDirectory: path, status: .completed,
+            response: "Result", sessionID: completedSession, createdAt: now,
+            startedAt: now, completedAt: now, agent: "codex"
+        )
+        let failed = RemoteClaudeJob(
+            id: UUID(), prompt: "Failed", workingDirectory: path, status: .failed,
+            errorMessage: "Failure", createdAt: now.addingTimeInterval(1),
+            completedAt: now.addingTimeInterval(1), agent: "codex"
+        )
+        let queued = RemoteClaudeJob(
+            id: UUID(), prompt: "Queued", workingDirectory: path, status: .queued,
+            createdAt: now.addingTimeInterval(2), agent: "codex"
+        )
+        let claude = RemoteClaudeJob(
+            id: UUID(), prompt: "Claude done", workingDirectory: path, status: .completed,
+            response: "Result", createdAt: now.addingTimeInterval(3),
+            completedAt: now.addingTimeInterval(3), agent: "claude"
+        )
+        for job in [completed, failed, queued, claude] {
+            try await fixture.repository.createClaudeJob(job)
+        }
+
+        let cleared = try await fixture.repository.hideFinishedClaudeJobs(agent: "codex", at: now)
+        XCTAssertEqual(cleared, 2)
+        let visible = try await fixture.repository.recentClaudeJobs(limit: 10)
+        XCTAssertEqual(Set(visible.map(\.id)), [queued.id, claude.id])
+        let retained = try await fixture.repository.claudeJob(id: completed.id)
+        XCTAssertNotNil(retained)
+        let sessions = try await fixture.repository.conversationSessionIDs(agent: "codex", project: path)
+        XCTAssertEqual(sessions, [completedSession])
+        let clearedAgain = try await fixture.repository.hideFinishedClaudeJobs(agent: "codex", at: now)
+        XCTAssertEqual(clearedAgain, 0)
+    }
+
     func testCodexCatalogExcludesUnregisteredExecAndDiagnostics() throws {
         let normal = UUID().uuidString, known = UUID().uuidString, diagnostic = UUID().uuidString
         let rows: [[String: Any]] = [
@@ -222,6 +263,62 @@ final class RemoteTests: XCTestCase {
             _ = try await runner.run(job: job)
             XCTFail("Busy owner must defer")
         } catch RemoteConversationError.busy {}
+    }
+
+    func testCodexRunnerWaitsForTransientInterruptedTurnToComplete() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let id = UUID().uuidString
+        let jobID = UUID()
+        let script = fixture.directory.appendingPathComponent("queue-transient-interrupted")
+        let pollCount = fixture.directory.appendingPathComponent("poll-count")
+        try """
+        #!/bin/sh
+        case "$1" in
+          queue)
+            exit 0
+            ;;
+          app-server)
+            polls=0
+            if [ -f "\(pollCount.path)" ]; then polls=$(cat "\(pollCount.path)"); fi
+            polls=$((polls + 1))
+            printf '%s' "$polls" > "\(pollCount.path)"
+            count=0
+            while IFS= read -r line; do
+              count=$((count + 1))
+              case "$count" in
+                1)
+                  printf '%s\n' '{"id":1,"result":{}}'
+                  ;;
+                3)
+                  if [ "$polls" -eq 1 ]; then
+                    status=interrupted
+                    agent=''
+                  else
+                    status=completed
+                    agent=',{"type":"agentMessage","text":"Finished after polling"}'
+                  fi
+                  printf '%s\n' '{"id":2,"result":{"data":[{"id":"turn","status":"'"$status"'","error":null,"items":[{"type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]}'"$agent"']}],"nextCursor":null}}'
+                  ;;
+              esac
+            done
+            exit 0
+            ;;
+        esac
+        exit 8
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let job = RemoteClaudeJob(id: jobID, prompt: "Continue", workingDirectory: path,
+                                  status: .running, sessionID: id, createdAt: Date(), agent: "codex")
+
+        let result = try await RemoteCodexQueueRunner(
+            codexPath: script.path, repository: fixture.repository,
+            timeout: 2, pollInterval: 0.01
+        ).run(job: job, directory: path, prompt: RemoteAgentRunner.codexPrompt(job: job, directory: path))
+
+        XCTAssertEqual(result, .init(response: "Finished after polling", sessionID: id))
+        XCTAssertEqual(try String(contentsOf: pollCount, encoding: .utf8), "2")
     }
 
     func testOversizedCodexConversationRotatesThroughSummaryAndRetiresOldChat() async throws {
@@ -603,6 +700,44 @@ final class RemoteTests: XCTestCase {
         let modes = try await fixture.repository.remoteModes()
         XCTAssertEqual(modes.first { $0.agent == "codex" }?.enabled, true)
         XCTAssertEqual(modes.first { $0.agent == "claude" }?.enabled, false)
+    }
+
+    func testRemoteHistoryClearEndpointIsAgentScopedAndShownOnMobilePage() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let now = Date()
+        for agent in ["codex", "claude"] {
+            try await fixture.repository.createClaudeJob(RemoteClaudeJob(
+                id: UUID(), prompt: "Finished", workingDirectory: path, status: .completed,
+                response: "Done", createdAt: now, completedAt: now, agent: agent
+            ))
+        }
+        let jobs = RemoteClaudeJobService(
+            repository: fixture.repository, runner: StubClaudeRunner(), workingDirectory: path
+        )
+        let app = try await Application.make(.testing)
+        configureApprovalHTTPRoutes(
+            app: app, service: fixture.service,
+            authorization: ApprovalHTTPAuthorization(token: fixture.token),
+            claudeService: jobs, agentRepository: fixture.repository
+        )
+        defer { Task { try? await app.asyncShutdown() } }
+
+        let unauthorized = try await app.sendRequest(.DELETE, "/codex/jobs")
+        XCTAssertEqual(unauthorized.status, .forbidden)
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        let page = try await app.sendRequest(.GET, "/codex", headers: headers)
+        XCTAssertTrue(page.body.string.contains("id=\"clear-history\""))
+
+        let cleared = try await app.sendRequest(.DELETE, "/codex/jobs", headers: headers)
+        XCTAssertEqual(cleared.status, .ok)
+        XCTAssertEqual(try cleared.content.decode(RemoteJobHistoryClearResponse.self).cleared, 1)
+        let codexJobs = try await app.sendRequest(.GET, "/codex/jobs", headers: headers)
+        let claudeJobs = try await app.sendRequest(.GET, "/claude/jobs", headers: headers)
+        XCTAssertTrue(try codexJobs.content.decode(RemoteClaudeJobListResponse.self).jobs.isEmpty)
+        XCTAssertEqual(try claudeJobs.content.decode(RemoteClaudeJobListResponse.self).jobs.count, 1)
     }
     func testPushMigrationPreservesExistingApprovalsAndClaudeJobs() async throws {
         let directory = FileManager.default.temporaryDirectory

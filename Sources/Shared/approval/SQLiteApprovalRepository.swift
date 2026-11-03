@@ -223,7 +223,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     id, prompt, working_directory, status, response, error_message, session_id,
                     created_at, started_at, completed_at, agent
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                \(ifAbsent ? "ON CONFLICT(id) DO NOTHING" : "")
+                \(ifAbsent ? "ON CONFLICT(id) DO UPDATE SET history_hidden_at = NULL" : "")
                 """,
                 arguments: [
                     job.id.uuidString,
@@ -314,12 +314,29 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 db,
                 sql: """
                 SELECT * FROM remote_claude_jobs
+                WHERE history_hidden_at IS NULL
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
                 arguments: [limit]
             )
             return try rows.map(Self.decodeClaudeJob)
+        }
+    }
+
+    public func hideFinishedClaudeJobs(agent: String, at: Date) async throws -> Int {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET history_hidden_at = ?
+                WHERE agent = ?
+                  AND history_hidden_at IS NULL
+                  AND status IN ('completed', 'failed')
+                """,
+                arguments: [at.timeIntervalSince1970, agent]
+            )
+            return db.changesCount
         }
     }
 
@@ -980,6 +997,11 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 table.column("successor_session_id", .text).notNull()
                 table.column("retired_at", .double).notNull()
                 table.primaryKey(["agent", "session_id"])
+            }
+        }
+        migrator.registerMigration("addRemoteJobHistoryVisibility") { db in
+            try db.alter(table: "remote_claude_jobs") { table in
+                table.add(column: "history_hidden_at", .double)
             }
         }
         return migrator
