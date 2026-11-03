@@ -127,38 +127,46 @@ private enum CodexThreadHistoryReader {
                 ],
             ],
         ], to: inputPipe.fileHandleForWriting)
-        var data = Data()
-        while !containsResponse(id: 1, in: data) {
-            let chunk = outputPipe.fileHandleForReading.availableData
-            guard !chunk.isEmpty else { throw RemoteConversationError.unavailable }
-            data.append(chunk)
-            guard data.count < 5_000_000 else { throw RemoteConversationError.unavailable }
-        }
+        var buffered = Data()
+        _ = try response(id: 1, from: outputPipe.fileHandleForReading, buffered: &buffered)
         try send(["method": "initialized", "params": [:]], to: inputPipe.fileHandleForWriting)
-        try send([
-            "id": 2,
-            "method": "thread/read",
-            "params": ["threadId": threadID, "includeTurns": true],
-        ], to: inputPipe.fileHandleForWriting)
-        while !containsResponse(id: 2, in: data) {
-            let chunk = outputPipe.fileHandleForReading.availableData
-            guard !chunk.isEmpty else { throw RemoteConversationError.unavailable }
-            data.append(chunk)
-            guard data.count < 5_000_000 else { throw RemoteConversationError.unavailable }
+        var cursor: String?
+        for requestID in 2..<22 {
+            var params: [String: Any] = [
+                "threadId": threadID,
+                "limit": 5,
+                "sortDirection": "desc",
+                "itemsView": "summary",
+            ]
+            if let cursor { params["cursor"] = cursor }
+            try send([
+                "id": requestID,
+                "method": "thread/turns/list",
+                "params": params,
+            ], to: inputPipe.fileHandleForWriting)
+            let message = try response(
+                id: requestID,
+                from: outputPipe.fileHandleForReading,
+                buffered: &buffered
+            )
+            guard message["error"] == nil,
+                  let result = message["result"] as? [String: Any],
+                  let turns = result["data"] as? [[String: Any]] else {
+                throw RemoteConversationError.unavailable
+            }
+            if let outcome = outcome(in: turns, marker: marker) {
+                try inputPipe.fileHandleForWriting.close()
+                return outcome
+            }
+            cursor = result["nextCursor"] as? String
+            if cursor == nil { break }
         }
         try inputPipe.fileHandleForWriting.close()
-        guard let message = data.split(separator: 10).compactMap({ line -> [String: Any]? in
-            try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
-        }).first(where: { ($0["id"] as? Int) == 2 || ($0["id"] as? NSNumber)?.intValue == 2 }),
-              message["error"] == nil,
-              let result = message["result"] as? [String: Any],
-              let thread = result["thread"] as? [String: Any],
-              thread["id"] as? String == threadID,
-              let turns = thread["turns"] as? [[String: Any]] else {
-            throw RemoteConversationError.unavailable
-        }
+        return nil
+    }
 
-        for turn in turns.reversed() {
+    private static func outcome(in turns: [[String: Any]], marker: String) -> CodexQueuedTurnOutcome? {
+        for turn in turns {
             guard let items = turn["items"] as? [[String: Any]],
                   items.contains(where: { Self.userMessage($0, contains: marker) }) else { continue }
             let status = turn["status"] as? String ?? ""
@@ -191,12 +199,22 @@ private enum CodexThreadHistoryReader {
         try input.write(contentsOf: data)
     }
 
-    private static func containsResponse(id: Int, in data: Data) -> Bool {
-        data.split(separator: 10).contains { line in
-            guard let message = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
-                return false
+    private static func response(id: Int, from output: FileHandle,
+                                 buffered: inout Data) throws -> [String: Any] {
+        while true {
+            while let newline = buffered.firstIndex(of: 10) {
+                let line = Data(buffered[..<newline])
+                buffered.removeSubrange(...newline)
+                guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+                    continue
+                }
+                let responseID = (message["id"] as? Int) ?? (message["id"] as? NSNumber)?.intValue
+                if responseID == id { return message }
             }
-            return (message["id"] as? Int) == id || (message["id"] as? NSNumber)?.intValue == id
+            guard buffered.count < 5_000_000 else { throw RemoteConversationError.unavailable }
+            let chunk = output.availableData
+            guard !chunk.isEmpty else { throw RemoteConversationError.unavailable }
+            buffered.append(chunk)
         }
     }
 }

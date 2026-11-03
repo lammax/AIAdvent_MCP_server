@@ -154,7 +154,10 @@ final class RemoteTests: XCTestCase {
                   printf '%s\\n' '{"id":1,"result":{}}'
                   ;;
                 3)
-                  (sleep 1; printf '%s\\n' '{"id":2,"result":{"thread":{"id":"\(id)","turns":[{"id":"turn","status":"completed","items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]},{"id":"agent","type":"agentMessage","text":"Retained"}]}]}}}') &
+                  printf '%s\\n' '{"id":2,"result":{"data":[{"id":"newer","status":"completed","itemsView":"summary","items":[]}],"nextCursor":"older"}}'
+                  ;;
+                4)
+                  (sleep 1; printf '%s\\n' '{"id":3,"result":{"data":[{"id":"turn","status":"completed","itemsView":"summary","items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Remote task ID: \(jobID.uuidString)"}]},{"id":"agent","type":"agentMessage","text":"Retained"}]}],"nextCursor":null}}') &
                   response_pid=$!
                   ;;
               esac
