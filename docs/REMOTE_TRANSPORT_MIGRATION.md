@@ -25,8 +25,8 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Remote Claude jobs | **Implemented with known risk** | Jobs persist and run serially. Closed/new chats use `bypassPermissions`; delivery into an open Cursor chat keeps that chat's permission mode. |
 | Browser protection | **Implemented baseline** | HMAC-derived Secure/HttpOnly/SameSite session cookie, CSRF token, Origin validation, no-store pages, and security headers |
 | Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
-| Independent agent modes and request context | **Implemented; basic iPhone flow verified** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive. The full multi-agent stop/restart matrix remains to be checked. |
-| Switch agent mode by incoming message channel | **Implemented; desktop via agent instructions** | Valid web task submission and its agent mode are stored atomically. Desktop global rules/skills call an idempotent per-agent helper before handling a real user message. Explicit commands take priority; web workers carry a channel marker and cannot undo a later desktop switch. No unconditional native hook is installed; existing clients must load the updated rules. |
+| Independent agent modes and request context | **Implemented; lifecycle matrix verified** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive. Isolated live checks verified per-agent independence, explicit stop, web preservation, desktop reset, and persistence across fresh processes. |
+| Switch agent mode by incoming message channel | **Implemented; desktop instructions verified** | Valid web task submission and its agent mode are stored atomically. Desktop global rules/skills call an idempotent per-agent helper before handling a real user message. Explicit commands take priority; web workers carry a channel marker and cannot undo a later desktop switch. Current Claude/Cursor sessions were started after the updated global instructions. No unconditional native hook is installed. |
 | Codex tasks in existing projects | **Implemented, installed and iPhone verified** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. Repeated iPhone tasks reached and completed in the selected existing chat, with their answers returned to the corresponding Remote cards. New chats use the Remote-only permission profile. |
 | Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
 | Task state and controlled stop | **Implemented, installed and iPhone verified** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. An iPhone acceptance task was stopped from its card and persisted as `cancelled`; stopping does not roll back changes already made. |
@@ -46,8 +46,9 @@ The deferred bootstrap installed commit `f45e026`; the installed MCP release too
 completed the normal post-bootstrap path for commit `47c46a7`. Both runs restarted
 HTTP healthy and preserved strict signatures. Repeated iPhone tasks completed in the selected Codex chat and returned
 their results to Remote. The iPhone stop button also cancelled and persisted a
-disposable task successfully. Full stop/restart and concurrent-agent acceptance
-coverage remains incomplete.
+disposable task successfully. The isolated desktop lifecycle matrix passed for both
+agents, including web preservation, desktop reset, explicit stop, independence, and
+persistence across fresh processes.
 
 ## Remaining product work
 
@@ -107,11 +108,15 @@ coverage remains incomplete.
    and records durable status/log output. Bootstrap release `f45e026` and the normal
    installed-MCP update of `47c46a7` both completed with valid signatures and healthy
    HTTP; the post-bootstrap production path is accepted end to end.
-4. **Desktop lifecycle verification.** Channel switching is implemented with an
-   authoritative HTTP entrypoint and instruction-driven desktop preflight. Verify
-   updated instructions in all existing Claude/Cursor chats. A deterministic native
-   desktop callback remains a future improvement; do not attach a blanket
-   `UserPromptSubmit` mode-reset hook to synthetic/background events.
+4. **Desktop lifecycle verification — implemented and accepted for the
+   instruction-driven lifecycle.** An isolated live matrix passed for Codex and
+   Claude: web workers preserved Remote mode, direct desktop preflight reset only the
+   addressed agent, explicit stop won, agents remained independent, and state
+   persisted across fresh processes. All Claude/Cursor sessions open during acceptance
+   were started after the updated global instructions; the current Codex chat also
+   loaded them. A deterministic native desktop callback remains an optional future
+   improvement; do not attach a blanket `UserPromptSubmit` mode-reset hook to
+   synthetic/background events.
 5. **Chat selection and new projects.** Add a picker for any existing chat beyond
    the implemented latest-chat continuation. Separately support creating a project
    under an allowlisted parent directory.
@@ -129,8 +134,9 @@ change it. Mode remains independent per agent, and explicit start/stop commands 
 precedence over channel defaults. Web submission stores mode and job atomically
 after validation. Tests cover invalid submissions, explicit overrides, rollback,
 independent agents, queued-worker behavior and child process markers. The desktop
-helper is tested independently of the model; automatic client compliance still
-depends on the client reading and following the installed global instructions.
+helper is tested independently of the model. Acceptance verified that the currently
+open clients were started after the installed global instructions; future clients must
+continue loading and following them.
 
 ## Important origin constraint
 

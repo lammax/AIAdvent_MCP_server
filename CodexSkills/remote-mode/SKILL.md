@@ -37,3 +37,11 @@ owner-only `~/Library/Logs/Remote/release-update.log`; do not silently retry. Cu
 task cards can show queue/chat wait, running, human approval wait, permission blocking,
 interruption, completion, failure, and cancellation, and queued/running work can be
 stopped without rolling back changes already made.
+
+For Remote roadmap or status questions, read
+`docs/REMOTE_TRANSPORT_MIGRATION.md` from the MCP_server checkout and verify live
+state when the answer depends on deployment. Treat items 1–4 (existing-chat iPhone
+flow, task state/stop, controlled releases, and the instruction-driven desktop
+lifecycle) as completed only while the document and production checks still support
+that conclusion. Report remaining work from the numbered roadmap instead of reusing
+an older chat summary, and mention uncommitted roadmap or skill changes.
