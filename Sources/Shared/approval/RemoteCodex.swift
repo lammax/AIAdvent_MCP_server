@@ -101,28 +101,47 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 directory: directory,
                 prompt: Self.rotationSummaryPrompt(jobID: job.id, directory: directory)
             ).response
-            return try await runNewCodexThread(
+            return try await runCodexThread(
                 job: job,
                 directory: directory,
                 prompt: Self.rotatedCodexPrompt(job: job, directory: directory, summary: summary),
                 retiredSessionID: retiredSessionID
             )
         }
-        if job.sessionID != nil {
+        if let sessionID = job.sessionID {
             guard let repository else { throw RemoteConversationError.unavailable }
-            return try await RemoteCodexQueueRunner(codexPath: codexPath, repository: repository)
-                .run(job: job, directory: directory, prompt: prompt)
+            if job.messageQueuedAt != nil {
+                return try await RemoteCodexQueueRunner(codexPath: codexPath, repository: repository)
+                    .run(job: job, directory: directory, prompt: prompt)
+            }
+            do {
+                // A closed Codex chat has no desktop owner to consume `codex queue`.
+                // Resume it non-interactively so Remote work starts without opening the chat.
+                return try await runCodexThread(
+                    job: job,
+                    directory: directory,
+                    prompt: prompt,
+                    resumeSessionID: sessionID
+                )
+            } catch RemoteConversationError.busy {
+                // An open desktop chat owns the rollout writer. Queueing is the supported
+                // way to hand the task to that owner without competing for the transcript.
+                return try await RemoteCodexQueueRunner(codexPath: codexPath, repository: repository)
+                    .run(job: job, directory: directory, prompt: prompt)
+            }
         }
-        return try await runNewCodexThread(job: job, directory: directory, prompt: prompt)
+        return try await runCodexThread(job: job, directory: directory, prompt: prompt)
     }
 
-    private func runNewCodexThread(
+    private func runCodexThread(
         job: RemoteClaudeJob,
         directory: String,
         prompt: String,
+        resumeSessionID: String? = nil,
         retiredSessionID: String? = nil
     ) async throws -> RemoteClaudeJobResult {
-        return try await Task.detached {
+        let cancellation = RemoteProcessCancellation()
+        let work = Task.detached {
             let outputDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("remote-codex-\(UUID())")
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: false,
                                                    attributes: [.posixPermissions: 0o700])
@@ -157,16 +176,20 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 "-c", "approval_policy=\"never\"",
                 "-c", "mcp_servers.remote.required=true"
                 ]
-                + ["--thread-source", "remote"]
+                + (resumeSessionID.map { ["resume", $0] } ?? ["--thread-source", "remote"])
                 + ["--skip-git-repo-check", "--json", "--output-last-message", outputURL.path,
                    "--", prompt]
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = pipe
             try process.run()
+            let processID = process.processIdentifier
+            await cancellation.register(processID: processID)
+            defer { Task { @concurrent in await cancellation.unregister(processID: processID) } }
             defer {
                 if process.isRunning { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }
             }
+            try Task.checkCancellation()
             // Drain output to avoid a full pipe blocking the child; retain only a bounded tail.
             var tail = Data()
             var lines = Data()
@@ -174,6 +197,7 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             while true {
                 let chunk = pipe.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
+                try Task.checkCancellation()
                 tail.append(chunk)
                 if tail.count > 20_000 { tail = Data(tail.suffix(20_000)) }
                 lines.append(chunk)
@@ -181,7 +205,10 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                     let line = Data(lines[..<end]); lines.removeSubrange(...end)
                     if let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                        event["type"] as? String == "thread.started", let id = event["thread_id"] as? String {
-                        guard UUID(uuidString: id) != nil else { throw RemoteConversationError.missing }
+                        guard UUID(uuidString: id) != nil,
+                              resumeSessionID == nil || id == resumeSessionID else {
+                            throw RemoteConversationError.missing
+                        }
                         actualSessionID = id
                         if let retiredSessionID {
                             guard let repository else { throw RemoteConversationError.unavailable }
@@ -198,13 +225,24 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 if lines.count > 1_000_000 { lines.removeAll(keepingCapacity: true) }
             }
             if process.isRunning { process.waitUntilExit() }
+            try Task.checkCancellation()
             guard process.terminationStatus == 0 else {
+                if resumeSessionID != nil, actualSessionID == nil,
+                   String(data: tail, encoding: .utf8)?.contains("already has an active writer") == true {
+                    throw RemoteConversationError.busy
+                }
                 throw RemoteClaudeJobError.processFailed("Codex exited with status \(process.terminationStatus). " + (String(data: tail, encoding: .utf8) ?? ""))
             }
             let result = try String(contentsOf: outputURL, encoding: .utf8)
             guard let actualSessionID else { throw RemoteConversationError.unavailable }
             return RemoteClaudeJobResult(response: String(result.prefix(200_000)), sessionID: actualSessionID)
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+            Task { @concurrent in await cancellation.cancel() }
+        }
     }
 
     static func rotationSummaryPrompt(jobID: UUID, directory: String) -> String {
@@ -255,7 +293,8 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
         Remote task ID: \(job.id.uuidString)
         Target: project="\(directory)", chat="\(job.sessionID ?? "new")".
         REMOTE_MESSAGE_CHANNEL=web: do not run the desktop Remote-mode reset.
-        Blocking questions: mcp__remote__ask_user (agent="codex", this project, actual chat ID).
+        Blocking questions: mcp__remote__ask_user (agent="codex", this project, actual chat ID,
+        task_id="\(job.id.uuidString)").
         It sends Web Push; never invent replies. Put the result in final for Remote.
         Git: commit only if explicitly asked, then push upstream and verify; no force-push or
         destructive operations without a separate explicit request.

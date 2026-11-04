@@ -158,6 +158,10 @@ public struct ApprovalService: Sendable {
         try await repository.cancel(id: id, now: now)
     }
 
+    public func cancelPendingApprovals(taskID: UUID, now: Date = Date()) async throws {
+        try await repository.cancelPendingApprovals(taskID: taskID, now: now)
+    }
+
     private func validate(questions: [ApprovalQuestion]) throws {
         guard (1...12).contains(questions.count) else {
             throw ApprovalError.invalidQuestionCount

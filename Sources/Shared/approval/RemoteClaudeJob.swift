@@ -5,6 +5,7 @@ public enum RemoteClaudeJobStatus: String, Codable, Sendable {
     case running
     case completed
     case failed
+    case cancelled
 }
 
 public struct RemoteClaudeJob: Codable, Sendable, Equatable {
@@ -55,6 +56,7 @@ public enum RemoteClaudeJobError: LocalizedError, Equatable {
     case promptTooLong
     case invalidWorkingDirectory
     case processFailed(String)
+    case notCancellable
 
     public var errorDescription: String? {
         switch self {
@@ -66,6 +68,8 @@ public enum RemoteClaudeJobError: LocalizedError, Equatable {
             "The configured Claude working directory is unavailable."
         case .processFailed(let message):
             message
+        case .notCancellable:
+            "Only queued or running Remote tasks can be stopped."
         }
     }
 }

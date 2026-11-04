@@ -32,6 +32,9 @@ Global rule entrypoints are `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`;
 the maintained skill sources are in `CodexSkills/remote-mode` and `ClaudeSkills/remote-mode`.
 
 MCP `ask_user` accepts optional `agent`, absolute `project`, and `chat` context.
+Remote web workers also pass their task UUID as `task_id`. This links a pending
+approval to its task card so the iPhone shows `waiting for user` and opens the exact
+question. Older clients may omit `task_id`; their approvals keep the previous behavior.
 Answers remain bound to the request UUID, not the selected UI filter. Approvals can be filtered by agent and project.
 The `remote_mode` MCP tool reads/sets one agent's mode. Modes guide message routing; they do not grant filesystem or sandbox permissions.
 
@@ -52,6 +55,13 @@ destructive Git operations require a separate explicit instruction. This last ru
 is agent guidance, not an OS-level ban: `.git` write access permits Git state changes.
 Results are persisted and displayed on `/codex`; these are new tasks, not continuations of a selected desktop chat.
 Interrupted Codex jobs are marked failed rather than replayed after restart.
+
+Task cards distinguish queued work, a busy selected chat, active work, a pending
+human answer, permission/approval blocking, interruption, failure, completion, and
+user cancellation. Queued and running cards have an authenticated, CSRF-protected
+stop action. Stopping prevents further Remote work, cancels a linked pending approval,
+and sends an interrupt followed by a bounded forced termination to an active local
+CLI process. It does not roll back filesystem or external changes already made.
 
 The **Usage** button on each agent page requests account limits and saves the answer
 in that page's task history, without navigating away or queuing a model task.

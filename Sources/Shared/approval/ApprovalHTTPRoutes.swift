@@ -178,6 +178,21 @@ public func configureApprovalHTTPRoutes(
                 cleared: try await claudeService.clearFinishedHistory(agent: agent)
             )
         }
+        app.post(.constant(agent), "jobs", ":jobID", "cancel") { request async throws -> RemoteClaudeJobResponse in
+            try requireMutationAuthorization(request, authorization: authorization)
+            guard let claudeService else { throw Abort(.notFound) }
+            let id = try remoteJobID(from: request)
+            guard let existing = try await claudeService.job(id: id), existing.agent == agent else {
+                throw Abort(.notFound, reason: "Remote task was not found.")
+            }
+            do {
+                let cancelled = try await claudeService.cancel(id: id)
+                try await service.cancelPendingApprovals(taskID: id)
+                return RemoteClaudeJobResponse(cancelled)
+            } catch let error as RemoteClaudeJobError {
+                throw Abort(.conflict, reason: error.localizedDescription)
+            }
+        }
     }
 
     app.get("api", "remote", "modes") { request async throws -> [RemoteAgentMode] in
@@ -217,7 +232,10 @@ public func configureApprovalHTTPRoutes(
     app.get("codex", "jobs") { request async throws -> RemoteClaudeJobListResponse in
         try requireAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
-        return RemoteClaudeJobListResponse(jobs: try await claudeService.recentJobs(limit: 100).filter { $0.agent == "codex" })
+        return RemoteClaudeJobListResponse(
+            jobs: try await claudeService.recentJobs(limit: 100).filter { $0.agent == "codex" },
+            pendingApprovals: try await service.pendingApprovals()
+        )
     }
     app.post("codex", "jobs") { request async throws -> RemoteClaudeJobResponse in
         try requireMutationAuthorization(request, authorization: authorization)
@@ -369,7 +387,10 @@ public func configureApprovalHTTPRoutes(
     app.get("claude", "jobs") { request async throws -> RemoteClaudeJobListResponse in
         try requireAuthorization(request, authorization: authorization)
         guard let claudeService else { throw Abort(.notFound) }
-        return RemoteClaudeJobListResponse(jobs: try await claudeService.recentJobs(limit: 100).filter { $0.agent == "claude" })
+        return RemoteClaudeJobListResponse(
+            jobs: try await claudeService.recentJobs(limit: 100).filter { $0.agent == "claude" },
+            pendingApprovals: try await service.pendingApprovals()
+        )
     }
 
     app.get("claude", "jobs", ":jobID") { request async throws -> RemoteClaudeJobResponse in
@@ -383,7 +404,10 @@ public func configureApprovalHTTPRoutes(
         guard let job = try await claudeService.job(id: id) else {
             throw Abort(.notFound, reason: "Claude job was not found.")
         }
-        return RemoteClaudeJobResponse(job)
+        return RemoteClaudeJobResponse(
+            job,
+            pendingApproval: try await service.pendingApprovals().first { $0.source?.taskID == job.id }
+        )
     }
 
     app.post("claude", "jobs") { request async throws -> RemoteClaudeJobResponse in
@@ -495,6 +519,14 @@ private func approvalID(from request: Request) throws -> UUID {
           let id = UUID(uuidString: rawID)
     else {
         throw Abort(.badRequest, reason: "Invalid approval ID.")
+    }
+    return id
+}
+
+private func remoteJobID(from request: Request) throws -> UUID {
+    guard let rawID = request.parameters.get("jobID"),
+          let id = UUID(uuidString: rawID) else {
+        throw Abort(.badRequest, reason: "Invalid Remote task ID.")
     }
     return id
 }
@@ -656,8 +688,12 @@ private struct RemoteCodexSubmitRequest: Content, Sendable {
 public struct RemoteClaudeJobListResponse: Content, Sendable {
     public let jobs: [RemoteClaudeJobResponse]
 
-    public init(jobs: [RemoteClaudeJob]) {
-        self.jobs = jobs.map(RemoteClaudeJobResponse.init)
+    public init(jobs: [RemoteClaudeJob], pendingApprovals: [Approval] = []) {
+        var approvalsByTask: [UUID: Approval] = [:]
+        for approval in pendingApprovals {
+            if let taskID = approval.source?.taskID { approvalsByTask[taskID] = approval }
+        }
+        self.jobs = jobs.map { RemoteClaudeJobResponse($0, pendingApproval: approvalsByTask[$0.id]) }
     }
 }
 
@@ -681,8 +717,11 @@ public struct RemoteClaudeJobResponse: Content, Sendable {
     public let createdAt: Date
     public let startedAt: Date?
     public let completedAt: Date?
+    public let state: String
+    public let stateMessage: String
+    public let pendingApprovalID: UUID?
 
-    public init(_ job: RemoteClaudeJob) {
+    public init(_ job: RemoteClaudeJob, pendingApproval: Approval? = nil) {
         agent = job.agent
         id = job.id
         prompt = job.prompt
@@ -694,6 +733,39 @@ public struct RemoteClaudeJobResponse: Content, Sendable {
         createdAt = job.createdAt
         startedAt = job.startedAt
         completedAt = job.completedAt
+        pendingApprovalID = pendingApproval?.id
+        if pendingApproval != nil {
+            state = "waiting_for_user"
+            stateMessage = "Waiting for your answer on the Approvals page."
+        } else {
+            let error = (job.errorMessage ?? "").lowercased()
+            switch job.status {
+            case .queued where error.contains("занят") || error.contains("busy"):
+                state = "waiting_for_chat"
+                stateMessage = "Waiting for the selected chat to become available."
+            case .queued:
+                state = "queued"
+                stateMessage = "Waiting for the local worker."
+            case .running:
+                state = "running"
+                stateMessage = "The agent is working."
+            case .completed:
+                state = "completed"
+                stateMessage = "Completed."
+            case .cancelled:
+                state = "cancelled"
+                stateMessage = "Stopped by user."
+            case .failed where error.contains("permission") || error.contains("sandbox") || error.contains("approval"):
+                state = "blocked"
+                stateMessage = "Blocked by permissions or an unavailable approval."
+            case .failed where error.contains("interrupt") || error.contains("restart"):
+                state = "interrupted"
+                stateMessage = "Interrupted before completion."
+            case .failed:
+                state = "failed"
+                stateMessage = "Failed."
+            }
+        }
     }
 }
 
@@ -1333,7 +1405,7 @@ private enum ApprovalWebPage {
           function renderJobs(jobs) {
             outputObserver.disconnect();
             jobsState.replaceChildren();
-            clearHistoryButton.disabled = !jobs.some(job => job.status === 'completed' || job.status === 'failed');
+            clearHistoryButton.disabled = !jobs.some(job => ['completed', 'failed', 'cancelled'].includes(job.status));
             if (!jobs.length) {
               const empty = node('div', 'card');
               empty.append(node('p', 'empty', 'No Claude requests yet'));
@@ -1344,20 +1416,55 @@ private enum ApprovalWebPage {
               const article = node('article', 'card job');
               const heading = node('div', 'job-heading');
               heading.append(
-                node('span', `status status-${job.status}`, job.status),
+                node('span', `status status-${job.state}`, job.state.replaceAll('_', ' ')),
                 node('time', 'muted', formatDate(job.createdAt))
               );
               article.append(heading);
               if (job.sessionID) article.append(node('p', 'muted', 'Чат: ' + job.sessionID));
               appendJobOutput(article, job, 'job-prompt', job.prompt, 'prompt');
+              article.append(node('p', 'muted', job.stateMessage));
+              if (job.pendingApprovalID) {
+                const approvalLink = node('a', 'secondary action-link', 'Ответить на вопрос');
+                approvalLink.href = '/approvals?approval=' + encodeURIComponent(job.pendingApprovalID);
+                article.append(approvalLink);
+              }
+              if (job.status === 'queued' || job.status === 'running') {
+                const stop = node('button', 'secondary danger', 'Остановить');
+                stop.type = 'button';
+                stop.addEventListener('click', async () => {
+                  if (!window.confirm('Остановить эту задачу? Уже выполненные изменения не будут отменены.')) return;
+                  stop.disabled = true;
+                  stop.textContent = 'Останавливаю…';
+                  try {
+                    const agent = window.location.pathname.split('/')[1];
+                    const response = await fetch(`/${agent}/jobs/${job.id}/cancel`, {
+                      method: 'POST', credentials: 'same-origin',
+                      headers: { 'X-CSRF-Token': csrfToken }
+                    });
+                    if (response.status === 401) { window.location = '/login'; return; }
+                    if (!response.ok) {
+                      const failure = await response.json().catch(() => ({}));
+                      throw new Error(failure.reason || 'Не удалось остановить задачу.');
+                    }
+                    renderedJobs = null;
+                    await loadJobs();
+                  } catch (error) {
+                    composerMessage.textContent = error.message || 'Не удалось остановить задачу.';
+                    composerMessage.className = 'error';
+                    stop.disabled = false;
+                    stop.textContent = 'Остановить';
+                  }
+                });
+                article.append(stop);
+              }
               if (job.status === 'queued') {
-                article.append(node('p', 'muted', job.errorMessage || 'Waiting for the local Claude worker…'));
-              } else if (job.status === 'running') {
-                article.append(node('p', 'muted', 'Claude is working. Approval questions will appear on the Approvals page.'));
+                if (job.errorMessage) article.append(node('p', 'muted', job.errorMessage));
               } else if (job.status === 'completed') {
                 appendJobOutput(article, job, 'job-response', job.response || 'Completed without a text response.');
               } else if (job.status === 'failed') {
                 appendJobOutput(article, job, 'job-error', job.errorMessage || 'Claude failed.');
+              } else if (job.status === 'cancelled') {
+                appendJobOutput(article, job, 'job-error', job.errorMessage || 'Stopped by user.');
               }
               jobsState.append(article);
             });
@@ -1488,6 +1595,11 @@ private enum ApprovalWebPage {
     .status { border-radius: 999px; padding: 5px 9px; font-size: .75rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
     .status-queued { background: #fef3c7; color: #92400e; }
     .status-running { background: #dbeafe; color: #1d4ed8; }
+    .status-waiting_for_user { background: #ede9fe; color: #6d28d9; }
+    .status-waiting_for_chat { background: #fef3c7; color: #92400e; }
+    .status-blocked { background: #ffedd5; color: #c2410c; }
+    .status-interrupted { background: #fee2e2; color: #991b1b; }
+    .status-cancelled { background: #e5e7eb; color: #374151; }
     .status-completed { background: #d1fae5; color: #047857; }
     .status-failed { background: #fee2e2; color: #b91c1c; }
     .job-prompt { margin: 14px 0 0; font-size: 1rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }

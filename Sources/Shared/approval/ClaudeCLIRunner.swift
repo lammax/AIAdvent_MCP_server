@@ -21,7 +21,7 @@ public struct ClaudeCLIRunner: RemoteClaudeJobRunning, Sendable {
         let executablePath = self.executablePath
         let nodePath = self.nodePath
         let claudeSDKPath = self.claudeSDKPath
-        return try await Task.detached {
+        let work = Task.detached {
             let baseline = try Self.sessionTurns(
                 nodePath: nodePath,
                 sdkPath: claudeSDKPath,
@@ -40,7 +40,9 @@ public struct ClaudeCLIRunner: RemoteClaudeJobRunning, Sendable {
             В сообщении объясни, что это запрос пользователя из Remote, Remote для Claude уже
             включён, и что финальный ответ нужно написать обычным финальным текстом в текущем
             чате: Remote прочитает его из истории. Получателю не нужно отвечать отправителю через
-            SendMessage. Передай пользовательский запрос без изменений из JSON-строки ниже.
+            SendMessage. Для блокирующих Remote-вопросов получатель должен передать task_id
+            "\(job.id.uuidString)" в mcp__remote__ask_user. Передай пользовательский запрос без
+            изменений из JSON-строки ниже.
             После успешной отправки ответь только RELAY_SENT.
 
             JSON-строка пользовательского запроса:
@@ -82,12 +84,18 @@ public struct ClaudeCLIRunner: RemoteClaudeJobRunning, Sendable {
             throw RemoteClaudeJobError.processFailed(
                 "Claude did not finish the request in the open Cursor chat within 30 minutes."
             )
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+        }
     }
 
     public func run(job: RemoteClaudeJob) async throws -> RemoteClaudeJobResult {
         let executablePath = self.executablePath
-        return try await Task.detached {
+        let cancellation = RemoteProcessCancellation()
+        let work = Task.detached {
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(
                 atPath: job.workingDirectory,
@@ -109,6 +117,8 @@ public struct ClaudeCLIRunner: RemoteClaudeJobRunning, Sendable {
             reset or report that Remote is disabled based on cached chat context.
             If the user asks about Remote state, treat it as enabled for this web turn.
             Existing host permissions and the selected chat context still apply.
+            For blocking questions pass task_id "\(job.id.uuidString)" to
+            mcp__remote__ask_user with the agent, project, and actual chat ID.
 
             User request:
             \(job.prompt)
@@ -128,8 +138,13 @@ public struct ClaudeCLIRunner: RemoteClaudeJobRunning, Sendable {
             process.standardError = outputPipe
 
             try process.run()
+            let processID = process.processIdentifier
+            await cancellation.register(processID: processID)
+            defer { Task { @concurrent in await cancellation.unregister(processID: processID) } }
+            try Task.checkCancellation()
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            try Task.checkCancellation()
 
             let rawOutput = String(data: outputData, encoding: .utf8) ?? ""
             let trimmedOutput = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -156,7 +171,13 @@ public struct ClaudeCLIRunner: RemoteClaudeJobRunning, Sendable {
                 response: String(trimmedOutput.prefix(200_000)),
                 sessionID: nil
             )
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+            Task { @concurrent in await cancellation.cancel() }
+        }
     }
 }
 

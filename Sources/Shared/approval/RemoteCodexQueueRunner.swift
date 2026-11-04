@@ -13,7 +13,7 @@ struct RemoteCodexQueueRunner: Sendable {
         guard let threadID = job.sessionID, UUID(uuidString: threadID) != nil else {
             throw RemoteConversationError.missing
         }
-        return try await Task.detached(priority: .utility) {
+        let work = Task.detached(priority: .utility) {
             if job.messageQueuedAt == nil {
                 try Self.queue(
                     executable: codexPath,
@@ -52,7 +52,12 @@ struct RemoteCodexQueueRunner: Sendable {
             throw RemoteClaudeJobError.processFailed(
                 "Codex queued the message, but the selected chat did not finish within \(Int(timeout)) seconds."
             )
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+        }
     }
 
     private static func queue(executable: String, threadID: String, directory: String, prompt: String) throws {

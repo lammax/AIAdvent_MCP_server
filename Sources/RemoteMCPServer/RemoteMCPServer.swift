@@ -104,6 +104,7 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
                         "agent": .object(["type": .string("string"), "enum": .array([.string("codex"), .string("claude")])]),
                         "project": .object(["type": .string("string"), "maxLength": .int(1024), "description": .string("Absolute project directory; display context, not execution authority.")]),
                         "chat": .object(["type": .string("string"), "maxLength": .int(200), "description": .string("Originating chat ID or label.")]),
+                        "task_id": .object(["type": .string("string"), "format": .string("uuid"), "description": .string("Remote task UUID used to show waiting state on its task card.")]),
                         "questions": .object([
                             "type": .string("array"),
                             "minItems": .int(1),
@@ -198,7 +199,16 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
                       project.hasPrefix("/"), project.count <= 1024,
                       (params.arguments?["chat"]?.stringValue?.count ?? 0) <= 200
                 else { throw ToolInputError.invalid("Source requires a valid agent and absolute project directory.") }
-                source = RemoteRequestSource(agent: agent, project: project, chat: params.arguments?["chat"]?.stringValue)
+                let rawTaskID = params.arguments?["task_id"]?.stringValue
+                guard rawTaskID == nil || rawTaskID.flatMap(UUID.init(uuidString:)) != nil else {
+                    throw ToolInputError.invalid("task_id must be a UUID.")
+                }
+                source = RemoteRequestSource(
+                    agent: agent,
+                    project: project,
+                    chat: params.arguments?["chat"]?.stringValue,
+                    taskID: rawTaskID.flatMap(UUID.init(uuidString:))
+                )
             } else {
                 source = nil
             }

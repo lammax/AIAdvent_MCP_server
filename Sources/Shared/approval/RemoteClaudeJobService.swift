@@ -7,6 +7,8 @@ public actor RemoteClaudeJobService {
     private let runner: any RemoteClaudeJobRunning
     private let workingDirectory: String
     private var worker: Task<Void, Never>?
+    private var activeJobID: UUID?
+    private var activeRun: Task<RemoteClaudeJobResult, Error>?
 
     public init(
         repository: any RemoteClaudeJobRepository,
@@ -60,6 +62,12 @@ public actor RemoteClaudeJobService {
         try await repository.hideFinishedClaudeJobs(agent: agent, at: now)
     }
 
+    public func cancel(id: UUID, now: Date = Date()) async throws -> RemoteClaudeJob {
+        let job = try await repository.requestClaudeJobCancellation(id: id, at: now)
+        if activeJobID == id { activeRun?.cancel() }
+        return job
+    }
+
     private func startWorkerIfNeeded() {
         guard worker == nil else { return }
         worker = Task { await runQueue() }
@@ -73,12 +81,24 @@ public actor RemoteClaudeJobService {
                     continue
                 }
                 do {
-                    let result = try await runner.run(job: job)
+                    let runner = self.runner
+                    let run = Task { @concurrent in try await runner.run(job: job) }
+                    activeJobID = job.id
+                    activeRun = run
+                    defer {
+                        if activeJobID == job.id {
+                            activeJobID = nil
+                            activeRun = nil
+                        }
+                    }
+                    let result = try await run.value
                     try await repository.completeClaudeJob(
                         id: job.id,
                         result: result,
                         completedAt: Date()
                     )
+                } catch is CancellationError {
+                    try await repository.cancelClaudeJob(id: job.id, at: Date())
                 } catch RemoteConversationError.busy {
                     try await repository.deferBusyConversation(id: job.id, until: Date().addingTimeInterval(5))
                 } catch {

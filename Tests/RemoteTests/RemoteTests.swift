@@ -93,6 +93,7 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(prompt.contains("chat=\"\(sessionID)\""))
         XCTAssertTrue(prompt.contains("REMOTE_MESSAGE_CHANNEL=web"))
         XCTAssertTrue(prompt.contains("mcp__remote__ask_user"))
+        XCTAssertTrue(prompt.contains("task_id=\"\(id.uuidString)\""))
         XCTAssertTrue(prompt.contains("Web Push"))
         XCTAssertTrue(prompt.contains("Put the result in final"))
         XCTAssertTrue(prompt.contains("commit only if explicitly asked"))
@@ -235,6 +236,48 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(resumed?.id, waiting.id)
         XCTAssertEqual(resumed?.sessionID, target)
     }
+
+    func testClosedCodexChatStartsThroughExecResume() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let id = UUID().uuidString
+        let script = fixture.directory.appendingPathComponent("closed-chat-resume")
+        let arguments = fixture.directory.appendingPathComponent("resume-arguments")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$@" > "\(arguments.path)"
+        resumed=no
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "resume" ]; then shift; [ "$1" = "\(id)" ] || exit 9; resumed=yes; fi
+          if [ "$1" = "--output-last-message" ]; then shift; output="$1"; fi
+          shift
+        done
+        [ "$resumed" = yes ] || exit 8
+        printf '%s' 'Closed chat completed' > "$output"
+        printf '%s\\n' '{"type":"thread.started","thread_id":"\(id)"}'
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let project = RemoteProject(name: "Test", path: path)
+        let job = RemoteClaudeJob(id: UUID(), prompt: "Continue", workingDirectory: path,
+                                  status: .running, sessionID: id, createdAt: Date(), agent: "codex")
+        let catalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [
+            .init(id: id, title: "Closed", project: path, updatedAt: 1, busy: false)
+        ]), repository: fixture.repository, projects: [project])
+        let runner = RemoteAgentRunner(
+            claude: ClaudeCLIRunner(executablePath: script.path), codexPath: script.path,
+            projects: [project], conversations: catalog, repository: fixture.repository
+        )
+
+        let result = try await runner.run(job: job)
+
+        XCTAssertEqual(result, .init(response: "Closed chat completed", sessionID: id))
+        let invoked = try String(contentsOf: arguments, encoding: .utf8)
+        XCTAssertTrue(invoked.contains("exec\n"))
+        XCTAssertTrue(invoked.contains("resume\n\(id)\n"))
+        XCTAssertFalse(invoked.contains("queue\n"))
+    }
+
     func testResumedRunnerUsesPinnedSessionAndRejectsBusyOwner() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
@@ -246,6 +289,10 @@ final class RemoteTests: XCTestCase {
         try """
         #!/bin/sh
         case "$1" in
+          exec)
+            printf '%s' 'thread already has an active writer'
+            exit 1
+            ;;
           queue)
             printf x >> "\(queueCount.path)"
             exit 0
@@ -294,6 +341,17 @@ final class RemoteTests: XCTestCase {
             _ = try await runner.run(job: job)
             XCTFail("Busy owner must defer")
         } catch RemoteConversationError.busy {}
+
+        let availableCatalog = RemoteConversationCatalog(reader: TestConversationReader(rows: [
+            .init(id: id, title: "Existing", project: path, updatedAt: 1, busy: false)
+        ]), repository: fixture.repository, projects: [project])
+        let fallbackRunner = RemoteAgentRunner(
+            claude: ClaudeCLIRunner(executablePath: script.path), codexPath: script.path,
+            projects: [project], conversations: availableCatalog, repository: fixture.repository
+        )
+        let fallback = try await fallbackRunner.run(job: job)
+        XCTAssertEqual(fallback, .init(response: "Retained", sessionID: id))
+        XCTAssertEqual(try String(contentsOf: queueCount, encoding: .utf8), "xx")
     }
 
     func testCodexRunnerWaitsForTransientInterruptedTurnToComplete() async throws {
@@ -774,6 +832,73 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(try codexJobs.content.decode(RemoteClaudeJobListResponse.self).jobs.isEmpty)
         XCTAssertEqual(try claudeJobs.content.decode(RemoteClaudeJobListResponse.self).jobs.count, 1)
     }
+
+    func testRemoteTaskCardsShowWaitingStateAndCanStopRunningWork() async throws {
+        let fixture = try makeFixture(timeout: 30)
+        defer { fixture.remove() }
+        let runner = BlockingJobRunner()
+        let jobs = RemoteClaudeJobService(
+            repository: fixture.repository,
+            runner: runner,
+            workingDirectory: fixture.directory.path
+        )
+        try await jobs.start()
+        let app = try await makeApplication(
+            service: fixture.service,
+            token: fixture.token,
+            claudeService: jobs
+        )
+        defer { Task { try? await app.asyncShutdown() } }
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        headers.contentType = .json
+
+        let page = try await app.sendRequest(.GET, "/claude", headers: headers)
+        XCTAssertTrue(page.body.string.contains("Остановить"))
+        XCTAssertTrue(page.body.string.contains("status-waiting_for_user"))
+        XCTAssertTrue(page.body.string.contains("status-interrupted"))
+
+        let submitted = try await app.sendRequest(
+            .POST, "/claude/jobs", headers: headers,
+            body: byteBuffer(#"{"prompt":"Long work"}"#)
+        )
+        let job = try submitted.content.decode(RemoteClaudeJobResponse.self)
+        for _ in 0..<100 {
+            if try await jobs.job(id: job.id)?.status == .running { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let runningStatus = try await jobs.job(id: job.id)?.status
+        XCTAssertEqual(runningStatus, .running)
+
+        _ = try await fixture.service.create(
+            questions: [ApprovalQuestion(id: "answer", question: "Continue?", kind: .text)],
+            source: RemoteRequestSource(
+                agent: "claude", project: fixture.directory.path, taskID: job.id
+            )
+        )
+        let waitingResponse = try await app.sendRequest(.GET, "/claude/jobs", headers: headers)
+        let waiting = try waitingResponse.content.decode(RemoteClaudeJobListResponse.self).jobs
+            .first { $0.id == job.id }
+        XCTAssertEqual(waiting?.state, "waiting_for_user")
+        XCTAssertNotNil(waiting?.pendingApprovalID)
+
+        let cancelledResponse = try await app.sendRequest(
+            .POST, "/claude/jobs/\(job.id.uuidString)/cancel", headers: headers
+        )
+        XCTAssertEqual(cancelledResponse.status, .ok)
+        XCTAssertEqual(try cancelledResponse.content.decode(RemoteClaudeJobResponse.self).status, .cancelled)
+        for _ in 0..<100 {
+            if await runner.wasCancelled { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let runnerWasCancelled = await runner.wasCancelled
+        let cancelledStatus = try await jobs.job(id: job.id)?.status
+        let remainingApprovals = try await fixture.service.pendingApprovals()
+        XCTAssertTrue(runnerWasCancelled)
+        XCTAssertEqual(cancelledStatus, .cancelled)
+        XCTAssertTrue(remainingApprovals.isEmpty)
+    }
+
     func testPushMigrationPreservesExistingApprovalsAndClaudeJobs() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("RemoteMigrationTests-\(UUID().uuidString)", isDirectory: true)
@@ -2061,6 +2186,20 @@ private struct StubClaudeRunner: RemoteClaudeJobRunning {
             response: "Done: \(job.prompt)",
             sessionID: job.sessionID ?? "stub-session"
         )
+    }
+}
+
+private actor BlockingJobRunner: RemoteClaudeJobRunning {
+    private(set) var wasCancelled = false
+
+    func run(job: RemoteClaudeJob) async throws -> RemoteClaudeJobResult {
+        do {
+            try await Task.sleep(for: .seconds(60))
+            return RemoteClaudeJobResult(response: "Unexpected completion", sessionID: job.sessionID)
+        } catch is CancellationError {
+            wasCancelled = true
+            throw CancellationError()
+        }
     }
 }
 

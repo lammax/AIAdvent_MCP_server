@@ -88,11 +88,13 @@ public struct RemoteRequestSource: Codable, Equatable, Sendable {
     public let agent: String
     public let project: String
     public let chat: String?
+    public let taskID: UUID?
 
-    public init(agent: String, project: String, chat: String? = nil) {
+    public init(agent: String, project: String, chat: String? = nil, taskID: UUID? = nil) {
         self.agent = agent
         self.project = project
         self.chat = chat
+        self.taskID = taskID
     }
 }
 

@@ -29,6 +29,7 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Switch agent mode by incoming message channel | **Implemented; desktop via agent instructions** | Valid web task submission and its agent mode are stored atomically. Desktop global rules/skills call an idempotent per-agent helper before handling a real user message. Explicit commands take priority; web workers carry a channel marker and cannot undo a later desktop switch. No unconditional native hook is installed; existing clients must load the updated rules. |
 | Codex tasks in existing projects | **Implemented and installed; iPhone E2E pending** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. New chats use the Remote-only permission profile. Existing chats use Codex's supported queue command and retain that chat's context and permissions. |
 | Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
+| Task state and controlled stop | **Implemented; production install pending** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. Queued/running tasks can be stopped without rolling back changes already made. |
 | Signed deployment | **Implemented; restart verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses installation while jobs are active. Documents permission survived reinstall; unattended self-update from a web job is not implemented. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
@@ -37,10 +38,12 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-Updated 3 November 2026. Agent-aware channel switching, latest-chat selection and
-existing-chat queue delivery are committed and installed. The current Remote test suite contains 54 passing
-tests. The installed HTTP server was built with native SwiftPM in debug configuration;
-a release build of this latest baseline remains a separate validation item.
+Updated 4 November 2026. Agent-aware channel switching, latest-chat selection and
+existing-chat queue delivery are committed and installed. Task-state reporting and
+controlled cancellation are implemented in the working tree and await the next signed
+installation. The current Remote test suite contains 62 passing tests. The installed
+HTTP server was built with native SwiftPM in debug configuration; a release build of
+this latest baseline remains a separate validation item.
 Local health, bundled assets and SQLite checks passed. iPhone usage reports,
 duplicate-card suppression, task disclosure controls, Codex tasks and the BrainApp
 Git flow were verified. Full stop/restart, cancellation and concurrent-agent
@@ -90,9 +93,13 @@ acceptance coverage remains incomplete.
    the message appears once in Codex Desktop and its answer returns to the same Remote
    card. Automated coverage already verifies that a server restart after enqueue
    resumes collection without replay.
-2. **Task visibility and recovery.** Stream progress into web task cards; distinguish
-   running, waiting for a human, blocked by permissions, cancelled and interrupted.
-   Add a controlled stop action and document queue behavior.
+2. **Task visibility and controlled stop — implemented, install pending.** Task cards
+   distinguish queued/running work, a busy selected chat, a linked human approval,
+   permission/approval blocking, interruption, failure, completion and cancellation.
+   Queued/running work can be stopped; active CLI processes receive an interrupt and
+   bounded forced termination, linked pending approvals are cancelled, and existing
+   side effects are explicitly not rolled back. Fine-grained streamed progress is not
+   available from every provider and remains a possible later enhancement.
 3. **Controlled server updates.** A web job cannot replace its own host server:
    its sandbox forbids the Remote runtime directory and the installer rejects active
    jobs. Design a separate, explicitly authorized update path that drains the queue,

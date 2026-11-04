@@ -196,6 +196,27 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         }
     }
 
+    public func cancelPendingApprovals(taskID: UUID, now: Date) async throws {
+        try await dbQueue.write { db in
+            try Self.expirePendingApprovals(db: db, now: now)
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, source_json FROM approvals WHERE status = ? AND source_json IS NOT NULL",
+                arguments: [ApprovalStatus.pending.rawValue]
+            )
+            for row in rows {
+                let sourceJSON: String = row["source_json"]
+                guard let source = try? Self.decode(RemoteRequestSource.self, from: sourceJSON),
+                      source.taskID == taskID else { continue }
+                let id: String = row["id"]
+                try db.execute(
+                    sql: "UPDATE approvals SET status = ? WHERE id = ? AND status = ?",
+                    arguments: [ApprovalStatus.cancelled.rawValue, id, ApprovalStatus.pending.rawValue]
+                )
+            }
+        }
+    }
+
     public func createClaudeJob(_ job: RemoteClaudeJob) async throws {
         try await insertClaudeJob(job, ifAbsent: false)
     }
@@ -332,11 +353,62 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 SET history_hidden_at = ?
                 WHERE agent = ?
                   AND history_hidden_at IS NULL
-                  AND status IN ('completed', 'failed')
+                  AND status IN ('completed', 'failed', 'cancelled')
                 """,
                 arguments: [at.timeIntervalSince1970, agent]
             )
             return db.changesCount
+        }
+    }
+
+    public func requestClaudeJobCancellation(id: UUID, at: Date) async throws -> RemoteClaudeJob {
+        try await dbQueue.write { db in
+            guard let current = try Self.fetchClaudeJob(db: db, id: id) else {
+                throw ApprovalPersistenceError.notFound
+            }
+            guard current.status == .queued || current.status == .running else {
+                if current.status == .cancelled { return current }
+                throw RemoteClaudeJobError.notCancellable
+            }
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET status = ?, error_message = ?, completed_at = ?, not_before = NULL
+                WHERE id = ? AND status IN (?, ?)
+                """,
+                arguments: [
+                    RemoteClaudeJobStatus.cancelled.rawValue,
+                    "Stopped by user.",
+                    at.timeIntervalSince1970,
+                    id.uuidString,
+                    RemoteClaudeJobStatus.queued.rawValue,
+                    RemoteClaudeJobStatus.running.rawValue,
+                ]
+            )
+            guard let updated = try Self.fetchClaudeJob(db: db, id: id) else {
+                throw ApprovalPersistenceError.corruptRecord
+            }
+            return updated
+        }
+    }
+
+    public func cancelClaudeJob(id: UUID, at: Date) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: """
+                UPDATE remote_claude_jobs
+                SET status = ?, error_message = ?, completed_at = ?, not_before = NULL
+                WHERE id = ? AND status IN (?, ?)
+                """,
+                arguments: [
+                    RemoteClaudeJobStatus.cancelled.rawValue,
+                    "Stopped by user.",
+                    at.timeIntervalSince1970,
+                    id.uuidString,
+                    RemoteClaudeJobStatus.queued.rawValue,
+                    RemoteClaudeJobStatus.running.rawValue,
+                ]
+            )
         }
     }
 
@@ -1211,6 +1283,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
 }
 
 private enum ApprovalPersistenceError: Error {
+    case notFound
     case corruptRecord
     case invalidOptionsEncoding
 }

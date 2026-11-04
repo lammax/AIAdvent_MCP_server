@@ -6,4 +6,5 @@ public protocol ApprovalRepository: Sendable {
     func pendingApprovals(now: Date) async throws -> [Approval]
     func respond(id: UUID, answers: [ApprovalAnswer], now: Date) async throws -> Approval
     func cancel(id: UUID, now: Date) async throws
+    func cancelPendingApprovals(taskID: UUID, now: Date) async throws
 }
