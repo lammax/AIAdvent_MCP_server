@@ -30,7 +30,7 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Codex tasks in existing projects | **Implemented, installed and iPhone verified** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. Repeated iPhone tasks reached and completed in the selected existing chat, with their answers returned to the corresponding Remote cards. New chats use the Remote-only permission profile. |
 | Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
 | Task state and controlled stop | **Implemented, installed and iPhone verified** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. An iPhone acceptance task was stopped from its card and persisted as `cancelled`; stopping does not roll back changes already made. |
-| Signed deployment | **Implemented; deferred bootstrap verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. Release `f45e026` drained its requesting task, installed signed MCP and HTTP binaries, restarted HTTP healthy, and recorded `completed`. The next release should exercise the installed MCP `install_release` entrypoint end to end. |
+| Signed deployment | **Implemented and Remote E2E verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. After bootstrap, the installed MCP `install_release` tool queued commit `47c46a7`, drained its requesting task, installed signed MCP and HTTP binaries, restarted HTTP healthy, and recorded `completed`. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
@@ -42,8 +42,9 @@ Updated 4 November 2026. Agent-aware channel switching, latest-chat selection,
 existing-chat delivery, task-state reporting, controlled cancellation and deferred
 signed updates are committed and installed. The current Remote test suite contains
 62 passing tests and both release products passed certificate-backed signature checks.
-The deferred bootstrap installed commit `f45e026`, restarted HTTP healthy and recorded
-`completed`. Repeated iPhone tasks completed in the selected Codex chat and returned
+The deferred bootstrap installed commit `f45e026`; the installed MCP release tool then
+completed the normal post-bootstrap path for commit `47c46a7`. Both runs restarted
+HTTP healthy and preserved strict signatures. Repeated iPhone tasks completed in the selected Codex chat and returned
 their results to Remote. The iPhone stop button also cancelled and persisted a
 disposable task successfully. Full stop/restart and concurrent-agent acceptance
 coverage remains incomplete.
@@ -99,13 +100,13 @@ coverage remains incomplete.
    bounded forced termination, linked pending approvals are cancelled, and existing
    side effects are explicitly not rolled back. Automated coverage passes, and an
    iPhone acceptance task was stopped from its card and persisted as `cancelled`.
-3. **Controlled server updates — implemented and bootstrap verified.** An explicitly
+3. **Controlled server updates — implemented, installed and accepted.** An explicitly
    requested web task uses a trusted MCP tool rather than receiving runtime-directory
    access. The updater requires clean synchronized Git state and fresh release output,
    drains the queue, preserves signing, retains installer backups, installs HTTP last,
-   and records durable status/log output. Bootstrap release `f45e026` completed with
-   valid signatures and healthy HTTP. Exercise the installed MCP tool on the next
-   requested release to complete acceptance of the normal post-bootstrap entrypoint.
+   and records durable status/log output. Bootstrap release `f45e026` and the normal
+   installed-MCP update of `47c46a7` both completed with valid signatures and healthy
+   HTTP; the post-bootstrap production path is accepted end to end.
 4. **Desktop lifecycle verification.** Channel switching is implemented with an
    authoritative HTTP entrypoint and instruction-driven desktop preflight. Verify
    updated instructions in all existing Claude/Cursor chats. A deterministic native
