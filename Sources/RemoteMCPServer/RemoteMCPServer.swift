@@ -27,6 +27,44 @@ private enum ToolInputError: LocalizedError {
     }
 }
 
+private func queueReleaseUpdate(arguments: [String: MCP.Value]?) async throws -> String {
+    guard let requestedProject = arguments?["project"]?.stringValue else {
+        throw ToolInputError.invalid("project is required.")
+    }
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let configuredRoot = ProcessInfo.processInfo.environment["REMOTE_UPDATE_ROOT"]
+        ?? home.appendingPathComponent("Documents/ThisIsMy/Programming/AI/MCP_server").path
+    let root = URL(fileURLWithPath: configuredRoot).resolvingSymlinksInPath().standardizedFileURL
+    let requested = URL(fileURLWithPath: requestedProject).resolvingSymlinksInPath().standardizedFileURL
+    guard requested.path == root.path else {
+        throw ToolInputError.invalid("Remote updates are restricted to the configured MCP_server repository.")
+    }
+    let installer = root.appendingPathComponent("Scripts/remote-install").path
+    let nativeRelease = root.appendingPathComponent(".build/release").path
+    let xcodeRelease = root.appendingPathComponent(".build/out/Products/Release").path
+    let releaseDirectory = FileManager.default.fileExists(atPath: nativeRelease)
+        ? nativeRelease : xcodeRelease
+
+    return try await Task.detached(priority: .utility) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: installer)
+        process.arguments = ["all", releaseDirectory, "--deferred"]
+        process.currentDirectoryURL = root
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let message = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw ToolInputError.invalid(message.isEmpty ? "Remote release update could not be queued." : message)
+        }
+        return message
+    }.value
+}
+
 private func parseQuestions(arguments: [String: MCP.Value]?) throws -> [ApprovalQuestion] {
     if let questionsValue = arguments?["questions"] {
         guard let values = questionsValue.arrayValue else {
@@ -95,6 +133,21 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
                     "agent": .object(["type": .string("string"), "enum": .array([.string("codex"), .string("claude")])]),
                     "enabled": .object(["type": .string("boolean")])
                  ]), "required": .array([.string("agent")]), "additionalProperties": .bool(false)])),
+            Tool(
+                name: "install_release",
+                description: "Queue a signed Remote release installation after all Remote tasks drain. Use only after an explicit user request, a successful release build, tests, commit, push, and upstream synchronization. The updater accepts only the configured MCP_server repository and uses Scripts/remote-install for both binaries.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "project": .object([
+                            "type": .string("string"),
+                            "description": .string("Absolute configured MCP_server repository path.")
+                        ])
+                    ]),
+                    "required": .array([.string("project")]),
+                    "additionalProperties": .bool(false)
+                ])
+            ),
             Tool(
                 name: "ask_user",
                 description: "Ask one or more questions in a single remote request. Each question can be single-select, multi-select, or free text. A lone free-text question requires an answer; free-text fields in a multi-question request are optional comments. Waits for the human response and never invents an answer. Prefer the questions array; legacy question/mode/options fields remain supported.",
@@ -169,6 +222,14 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
     }
 
     await server.withMethodHandler(CallTool.self) { params in
+        if params.name == "install_release" {
+            do {
+                let message = try await queueReleaseUpdate(arguments: params.arguments)
+                return .init(content: [.text(text: message, annotations: nil, _meta: nil)], isError: false)
+            } catch {
+                return .init(content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)], isError: true)
+            }
+        }
         if params.name == "remote_mode" {
             do {
                 guard let agent = params.arguments?["agent"]?.stringValue, ["codex", "claude"].contains(agent) else {

@@ -145,6 +145,18 @@ ad hoc signing, refuses updates during active jobs, backs up the installed binar
 resources, and restarts/checks HTTP. It also supports `RemoteMCPServer`; existing MCP
 clients keep their current process until reconnected.
 
+After a one-time local installation of a version that exposes the MCP
+`install_release` tool, an explicitly requested web task can queue its own production
+release. The tool accepts only this configured MCP_server checkout, requires a clean
+working tree synchronized with its upstream, and requires fresh release binaries.
+It starts a detached trusted updater and returns immediately. The updater waits for
+all queued/running tasks—including the requesting task—to finish, installs
+`RemoteMCPServer` first and `RemoteHTTPServer` last through `remote-install`, then
+records `queued`, `installing`, `completed`, or `failed` in
+`~/Library/Application Support/Remote/release-update.json`. Its owner-only log is
+`~/Library/Logs/Remote/release-update.log`. Backups remain under the existing Remote
+backup directory. Do not invoke deferred mode for uncommitted or unpushed code.
+
 After the first signed install, grant **Documents** access on the Mac once and test
 a real task using a project in Documents. Reinstall with the same certificate and
 repeat that test to confirm the permission survives. Signing/health checks alone do

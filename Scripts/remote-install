@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """Sign and install Remote binaries without changing their persistent code identity."""
 import argparse
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 
 
 ROOT = Path.home() / "Library/Application Support/Remote"
 IDENTIFIERS = {"RemoteHTTPServer": "com.lammax.remote.http", "RemoteMCPServer": "com.lammax.remote.mcp"}
+UPDATE_STATUS = ROOT / "release-update.json"
+UPDATE_LOG = Path.home() / "Library/Logs/Remote/release-update.log"
+UPDATE_LOCK = ROOT / ".release-update.lock"
 
 
 def run(*args):
@@ -38,12 +44,165 @@ def ensure_idle():
         raise RuntimeError("Remote has active jobs. Wait for completion before installing.")
 
 
+def active_job_count():
+    database = ROOT / "approval.sqlite"
+    if not database.exists():
+        raise RuntimeError("Remote database is missing; use the initial service setup first.")
+    with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+        return connection.execute(
+            "SELECT count(*) FROM remote_claude_jobs WHERE status IN ('running', 'queued')"
+        ).fetchone()[0]
+
+
+def write_update_status(request_id, state, source, commit=None, error=None):
+    payload = {
+        "request_id": request_id,
+        "state": state,
+        "source": str(source),
+        "commit": commit,
+        "error": error,
+        "updated_at": time.time(),
+    }
+    temporary = UPDATE_STATUS.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n")
+    temporary.chmod(0o600)
+    os.replace(temporary, UPDATE_STATUS)
+
+
+def validate_release_source(release_directory):
+    source_root = Path(__file__).resolve().parent.parent
+    allowed = {
+        (source_root / ".build/release").resolve(),
+        (source_root / ".build/out/Products/Release").resolve(),
+    }
+    release_directory = release_directory.resolve(strict=True)
+    if release_directory not in allowed:
+        raise RuntimeError("Release directory must be this repository's SwiftPM release output.")
+    status = run("/usr/bin/git", "-C", str(source_root), "status", "--porcelain").stdout
+    if status.strip():
+        raise RuntimeError("Refusing Remote update from a dirty working tree.")
+    divergence = run(
+        "/usr/bin/git", "-C", str(source_root), "rev-list", "--left-right", "--count",
+        "@{upstream}...HEAD"
+    ).stdout.strip()
+    if divergence != "0\t0":
+        raise RuntimeError("Refusing Remote update until HEAD and its upstream are synchronized.")
+    commit = run("/usr/bin/git", "-C", str(source_root), "rev-parse", "HEAD").stdout.strip()
+    bundle = release_directory / "MCPServer_Shared.bundle"
+    if not bundle.is_dir():
+        raise RuntimeError("MCPServer_Shared.bundle is missing from the release output.")
+    newest_source = max(
+        path.stat().st_mtime
+        for parent in (source_root / "Sources", source_root / "Package.swift")
+        for path in ([parent] if parent.is_file() else parent.rglob("*.swift"))
+    )
+    for product in ("RemoteMCPServer", "RemoteHTTPServer"):
+        binary = release_directory / product
+        if not binary.is_file() or binary.stat().st_mtime < newest_source:
+            raise RuntimeError(f"{product} is missing or older than the Swift sources; rebuild release first.")
+    return source_root, release_directory, commit
+
+
+def defer_release_update(release_directory):
+    source_root, release_directory, commit = validate_release_source(release_directory)
+    if UPDATE_STATUS.exists():
+        try:
+            existing = json.loads(UPDATE_STATUS.read_text())
+            if existing.get("state") in {"queued", "installing"}:
+                raise RuntimeError("A Remote release update is already pending.")
+        except json.JSONDecodeError:
+            pass
+    try:
+        UPDATE_LOCK.mkdir(mode=0o700)
+    except FileExistsError:
+        if time.time() - UPDATE_LOCK.stat().st_mtime < 6 * 60 * 60:
+            raise RuntimeError("A Remote release update is already pending.")
+        UPDATE_LOCK.rmdir()
+        UPDATE_LOCK.mkdir(mode=0o700)
+    request_id = str(uuid.uuid4()).upper()
+    try:
+        write_update_status(request_id, "queued", release_directory, commit=commit)
+        UPDATE_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log = open(UPDATE_LOG, "a", buffering=1)
+        try:
+            subprocess.Popen(
+                [
+                    sys.executable, str(Path(__file__).resolve()), "all", str(release_directory),
+                    "--wait-for-idle", "--request-id", request_id, "--commit", commit,
+                ],
+                cwd=source_root,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            log.close()
+    except Exception:
+        UPDATE_LOCK.rmdir()
+        raise
+    print(f"Remote release update queued: {request_id}")
+
+
+def wait_and_install_all(release_directory, request_id, expected_commit):
+    source_root, release_directory, commit = validate_release_source(release_directory)
+    if commit != expected_commit:
+        raise RuntimeError("Repository HEAD changed after the release update was queued.")
+    deadline = time.monotonic() + 6 * 60 * 60
+    def wait_until_idle():
+        while active_job_count():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Remote jobs did not drain within six hours.")
+            time.sleep(2)
+
+    wait_until_idle()
+    write_update_status(request_id, "installing", release_directory, commit=commit)
+    # MCP first: replacing it does not restart the HTTP worker. HTTP goes last and
+    # performs the final signed restart/health check.
+    for product in ("RemoteMCPServer", "RemoteHTTPServer"):
+        while True:
+            wait_until_idle()
+            try:
+                run(str(Path(__file__).resolve()), product, str(release_directory / product))
+                break
+            except subprocess.CalledProcessError as error:
+                detail = (error.stdout or "") + (error.stderr or "")
+                if "Remote has active jobs" not in detail:
+                    raise
+                time.sleep(2)
+    write_update_status(request_id, "completed", release_directory, commit=commit)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("product", choices=IDENTIFIERS)
+    parser.add_argument("product", choices=[*IDENTIFIERS, "all"])
     parser.add_argument("binary", type=Path)
     parser.add_argument("--check-only", action="store_true", help="Sign a temporary copy and verify identity without installation")
+    parser.add_argument("--deferred", action="store_true", help="Queue both products for installation after Remote jobs drain")
+    parser.add_argument("--wait-for-idle", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--request-id", help=argparse.SUPPRESS)
+    parser.add_argument("--commit", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.product == "all":
+        if args.deferred:
+            defer_release_update(args.binary)
+            return
+        if args.wait_for_idle and args.request_id and args.commit:
+            try:
+                wait_and_install_all(args.binary, args.request_id, args.commit)
+            except Exception as error:
+                write_update_status(args.request_id, "failed", args.binary, commit=args.commit, error=str(error))
+                raise
+            finally:
+                try:
+                    UPDATE_LOCK.rmdir()
+                except FileNotFoundError:
+                    pass
+            return
+        raise RuntimeError("Use product 'all' only with --deferred.")
+    if args.deferred or args.wait_for_idle:
+        raise RuntimeError("Deferred mode installs both products; use product 'all'.")
     source = args.binary.resolve(strict=True)
     identity = (ROOT / "signing-identity").read_text().strip()
     if not re.fullmatch(r"[0-9A-Fa-f]{40}", identity):

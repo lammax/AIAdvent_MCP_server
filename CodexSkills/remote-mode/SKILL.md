@@ -21,3 +21,10 @@ Every message sent through Remote must include a free-text answer field, includi
 While Codex mode is enabled, send ALL user-facing questions and reports through `mcp__remote__ask_user`, including clarifications, progress reports, confirmations, and final results, and also duplicate them in the local chat as the user requested. Do not use desktop question widgets for Remote questions. Include `agent: "codex"`, `project` as the absolute current project directory, and `chat` as the actual chat ID when available (otherwise omit it). When the current web task supplies a Remote task ID, also pass it as `task_id` so the task card shows that it is waiting for the user. Use single_select, multi_select, or text questions as needed, preserving returned answers by ID. Each request automatically queues Web Push; do not send a second push or use Claude PushNotification.
 
 Read mode with `/Users/lammax/.local/bin/remote-control status --agent codex`. If the MCP tool is unavailable, state that the current chat needs its MCP connection refreshed; do not invent a response or claim a push was delivered. HTTP requests with an application token cannot substitute for host permission approval. Remote answers cover task choices only, not Codex sandbox/approval restrictions.
+
+When the user explicitly requests a Remote production release from a web task, first
+run the relevant tests and release build, commit and push only when requested, and
+verify that the working tree is clean and HEAD matches its upstream. Then call
+`mcp__remote__install_release` with the MCP_server project path. The trusted updater
+waits until the requesting task and the rest of the queue finish before installing
+both signed binaries. Never bypass it by writing the Remote runtime directory.

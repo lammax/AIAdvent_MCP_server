@@ -21,3 +21,10 @@ Never run both actions in one invocation. If the direction is ambiguous, ask a c
 Report the resulting Claude mode concisely. It is independent of Codex; stopping it leaves the shared HTTP server running. When starting provide `https://macbook-pro.tailab24a8.ts.net/approvals` and `https://macbook-pro.tailab24a8.ts.net/claude`. Never expose the token.
 
 When routing questions or reports through `mcp__remote__ask_user`, include `agent: "claude"`, `project` as the absolute current project directory, and the actual `chat` ID when available. When the current web task supplies a Remote task ID, also pass it as `task_id` so the task card shows that it is waiting for the user. Each request automatically queues Web Push. Never substitute the built-in PushNotification tool.
+
+When the user explicitly requests a Remote production release from a web task, first
+run the relevant tests and release build, commit and push only when requested, and
+verify that the working tree is clean and HEAD matches its upstream. Then call
+`mcp__remote__install_release` with the MCP_server project path. The trusted updater
+waits until the requesting task and the rest of the queue finish before installing
+both signed binaries. Never bypass it by writing the Remote runtime directory.

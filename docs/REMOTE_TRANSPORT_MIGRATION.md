@@ -30,7 +30,7 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Codex tasks in existing projects | **Implemented and installed; iPhone E2E pending** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. New chats use the Remote-only permission profile. Existing chats use Codex's supported queue command and retain that chat's context and permissions. |
 | Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
 | Task state and controlled stop | **Implemented; production install pending** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. Queued/running tasks can be stopped without rolling back changes already made. |
-| Signed deployment | **Implemented; restart verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses installation while jobs are active. Documents permission survived reinstall; unattended self-update from a web job is not implemented. |
+| Signed deployment | **Implemented; deferred Remote path awaiting bootstrap** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. The MCP release tool validates a clean synchronized checkout, queues a detached updater, drains jobs, installs MCP then HTTP, and records durable status. One local install is required to bootstrap the new MCP schema/tool. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
@@ -100,10 +100,12 @@ acceptance coverage remains incomplete.
    bounded forced termination, linked pending approvals are cancelled, and existing
    side effects are explicitly not rolled back. Fine-grained streamed progress is not
    available from every provider and remains a possible later enhancement.
-3. **Controlled server updates.** A web job cannot replace its own host server:
-   its sandbox forbids the Remote runtime directory and the installer rejects active
-   jobs. Design a separate, explicitly authorized update path that drains the queue,
-   preserves signing and supports rollback without granting broad writes to agents.
+3. **Controlled server updates — implemented, bootstrap pending.** An explicitly
+   requested web task uses a trusted MCP tool rather than receiving runtime-directory
+   access. The updater requires clean synchronized Git state and fresh release output,
+   drains the queue, preserves signing, retains installer backups, installs HTTP last,
+   and records durable status/log output. Install this version locally once, refresh
+   MCP clients, then run the first deferred production acceptance test.
 4. **Desktop lifecycle verification.** Channel switching is implemented with an
    authoritative HTTP entrypoint and instruction-driven desktop preflight. Verify
    updated instructions in all existing Claude/Cursor chats. A deterministic native
