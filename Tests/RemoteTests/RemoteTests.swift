@@ -764,6 +764,19 @@ final class RemoteTests: XCTestCase {
 
         let project = try await registry.create(name: "Fresh Project", directoryName: "fresh-project", parent: parent.path)
         XCTAssertEqual(project.path, parent.appendingPathComponent("fresh-project").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.path + "/.git"))
+        let git = Process()
+        git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        git.arguments = ["-C", project.path, "branch", "--show-current"]
+        let gitOutput = Pipe()
+        git.standardOutput = gitOutput
+        git.standardError = FileHandle.nullDevice
+        try git.run()
+        let branch = String(decoding: gitOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        git.waitUntilExit()
+        XCTAssertEqual(git.terminationStatus, 0)
+        XCTAssertEqual(branch, "main")
         let resolved = try await registry.resolve(project.path)
         XCTAssertEqual(resolved, project.path)
         XCTAssertEqual(try RemoteProject.load(from: projectsFile.path), [project])
@@ -918,6 +931,8 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(page.body.string.contains("'existing:' + chat.id"))
         XCTAssertTrue(page.body.string.contains("/api/remote/project-parents"))
         XCTAssertTrue(page.body.string.contains("id=\"create-project\""))
+        XCTAssertTrue(page.body.string.contains("id=\"create-project\" class=\"secondary composer-action\""))
+        XCTAssertTrue(page.body.string.contains("id=\"refresh-chat\" class=\"secondary composer-action\""))
 
         let cleared = try await app.sendRequest(.DELETE, "/codex/jobs", headers: headers)
         XCTAssertEqual(cleared.status, .ok)

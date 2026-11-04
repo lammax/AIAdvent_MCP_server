@@ -47,7 +47,7 @@ public struct RemoteProjectCreationRoot: Codable, Sendable, Equatable {
 }
 
 public enum RemoteProjectRegistryError: LocalizedError, Equatable {
-    case unavailable, invalidName, invalidParent, alreadyExists
+    case unavailable, invalidName, invalidParent, alreadyExists, gitInitializationFailed
 
     public var errorDescription: String? {
         switch self {
@@ -55,6 +55,7 @@ public enum RemoteProjectRegistryError: LocalizedError, Equatable {
         case .invalidName: "Use a project name and a single directory name without slashes."
         case .invalidParent: "Choose an allowed parent directory."
         case .alreadyExists: "That project directory already exists."
+        case .gitInitializationFailed: "The project directory was created, but Git initialization failed."
         }
     }
 }
@@ -128,6 +129,7 @@ public actor RemoteProjectRegistry {
         let project = RemoteProject(name: name, path: targetURL.path)
         let updated = registeredProjects + [project]
         do {
+            try initializeGitRepository(at: targetURL)
             var data = try JSONEncoder.remoteProjects.encode(updated)
             data.append(0x0A)
             try data.write(to: URL(fileURLWithPath: projectsFile), options: .atomic)
@@ -142,6 +144,23 @@ public actor RemoteProjectRegistry {
 
     private nonisolated func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private nonisolated func initializeGitRepository(at directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["init", "--initial-branch=main", directory.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw RemoteProjectRegistryError.gitInitializationFailed
+        }
+        guard process.terminationStatus == 0,
+              FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git", isDirectory: true).path)
+        else { throw RemoteProjectRegistryError.gitInitializationFailed }
     }
 }
 

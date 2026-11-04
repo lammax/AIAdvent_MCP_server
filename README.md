@@ -56,7 +56,8 @@ allowed parent directory. Each entry contains `name` and an absolute `path`, for
 ```
 
 Remote accepts only a single new directory component directly below one of these
-canonical parents, creates the directory, and immediately adds it to `projects.json`.
+canonical parents, creates the directory, initializes a Git repository with `main` as
+its initial branch, and immediately adds it to `projects.json`.
 Traversal, unlisted parents, existing paths, and cross-project chat IDs are rejected.
 Tasks use a Remote-only permission profile derived from `:workspace`, with explicit
 write access to the selected project's `.git`. `.codex`, `.agents`, and `.aws` remain

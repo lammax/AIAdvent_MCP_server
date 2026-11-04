@@ -1206,13 +1206,13 @@ private enum ApprovalWebPage {
                   <input id="project-directory" type="text" maxlength="100" autocomplete="off">
                   <label for="project-parent">Расположение</label>
                   <select id="project-parent"></select>
-                  <button id="create-project" class="secondary" type="button">Создать проект</button>
+                  <button id="create-project" class="secondary composer-action" type="button">Создать новый проект</button>
                   <p id="project-message" class="muted" aria-live="polite"></p>
                 </details>
                 <label for="conversation">Чат</label>
                 <select id="conversation"><option value="latest">Продолжить последний чат</option><option value="new">Новый чат</option></select>
                 <p id="chat-summary" class="muted" aria-live="polite">Выберите проект.</p>
-                <button id="refresh-chat" class="secondary" type="button">Обновить последний чат</button>
+                <button id="refresh-chat" class="secondary composer-action" type="button">Обновить последний чат</button>
                 <label for="prompt">Request</label>
                 <textarea id="prompt" name="prompt" maxlength="20000" rows="7" placeholder="Ask Claude to work on your Mac…" required></textarea>
                 <button id="send" type="submit">Send to Claude</button>
@@ -1684,6 +1684,7 @@ private enum ApprovalWebPage {
     button { min-height: 50px; width: 100%; border: 0; border-radius: 13px; background: #2563eb; color: white; padding: 12px 16px; font-size: 1rem; font-weight: 750; margin-top: 16px; overflow-wrap: anywhere; }
     button:disabled { opacity: .55; }
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
+    button.secondary.composer-action { width: 100%; min-height: 50px; margin-top: 16px; }
     button.secondary.danger { background: #fee2e2; color: #991b1b; }
     .history-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin: 18px 0 12px; }
     .history-toolbar .muted { flex: 1; margin: 0; }

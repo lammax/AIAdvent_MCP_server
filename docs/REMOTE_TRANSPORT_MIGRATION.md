@@ -122,8 +122,9 @@ persistence across fresh processes.
    selected project and pins an explicitly chosen ID. Codex discovery collects all
    paginated chat pages instead of stopping at the first relevant page. A dynamic
    project registry can create one direct child directory beneath a parent explicitly
-   listed in `project-parents.json`, persist it atomically in `projects.json`, and use
-   it immediately without restarting HTTP. Traversal, unlisted parents, existing
+   listed in `project-parents.json`, initialize Git on branch `main`, persist it
+   atomically in `projects.json`, and use it immediately without restarting HTTP.
+   Traversal, unlisted parents, existing
    paths, stale/foreign chat IDs, authentication and CSRF are enforced. Production is
    configured to allow creation only directly beneath
    `/Users/lammax/Documents/ThisIsMy/Programming/AI`; install and verify on the iPhone
