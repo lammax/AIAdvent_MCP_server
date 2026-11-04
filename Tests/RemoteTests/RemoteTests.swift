@@ -200,15 +200,17 @@ final class RemoteTests: XCTestCase {
         let unauth = try await app.sendRequest(.GET, "/api/remote/conversations?agent=codex&project=" + path)
         XCTAssertEqual(unauth.status, .unauthorized)
         var headers = HTTPHeaders(); headers.bearerAuthorization = .init(token: fixture.token); headers.contentType = .json
-        func payload(_ id: String) throws -> ByteBuffer {
+        func payload(_ id: String, conversation: String = "latest") throws -> ByteBuffer {
             byteBuffer(String(decoding: try JSONEncoder().encode(["prompt":"Continue", "project":path,
-                "conversation":"latest", "sessionID":id]), as: UTF8.self))
+                "conversation":conversation, "sessionID":id]), as: UTF8.self))
         }
-        let invalid = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: payload(UUID().uuidString))
+        let invalid = try await app.sendRequest(.POST, "/codex/jobs", headers: headers,
+                                                body: payload(UUID().uuidString, conversation: "existing"))
         XCTAssertEqual(invalid.status, .conflict)
         let before = try await fixture.repository.recentClaudeJobs(limit: 10)
         XCTAssertTrue(before.isEmpty)
-        let accepted = try await app.sendRequest(.POST, "/codex/jobs", headers: headers, body: payload(target.id))
+        let accepted = try await app.sendRequest(.POST, "/codex/jobs", headers: headers,
+                                                 body: payload(target.id, conversation: "existing"))
         XCTAssertEqual(accepted.status, .ok)
         let response = try accepted.content.decode(RemoteClaudeJobResponse.self)
         XCTAssertEqual(response.sessionID, target.id)
@@ -747,6 +749,96 @@ final class RemoteTests: XCTestCase {
         XCTAssertThrowsError(try RemoteProject.resolve(directory.appendingPathComponent("..").path, in: projects))
     }
 
+    func testProjectRegistryCreatesOnlyDirectChildrenAndPersistsImmediately() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let parent = fixture.directory.appendingPathComponent("Allowed", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        let projectsFile = fixture.directory.appendingPathComponent("projects.json")
+        try Data("[]\n".utf8).write(to: projectsFile)
+        let registry = RemoteProjectRegistry(
+            projects: [],
+            creationRoots: [.init(name: "Allowed", path: parent.path)],
+            projectsFile: projectsFile.path
+        )
+
+        let project = try await registry.create(name: "Fresh Project", directoryName: "fresh-project", parent: parent.path)
+        XCTAssertEqual(project.path, parent.appendingPathComponent("fresh-project").path)
+        let resolved = try await registry.resolve(project.path)
+        XCTAssertEqual(resolved, project.path)
+        XCTAssertEqual(try RemoteProject.load(from: projectsFile.path), [project])
+        let permissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: projectsFile.path)[.posixPermissions] as? NSNumber
+        )
+        XCTAssertEqual(permissions.intValue & 0o777, 0o600)
+
+        do {
+            _ = try await registry.create(name: "Escape", directoryName: "../escape", parent: parent.path)
+            XCTFail("Traversal must be rejected")
+        } catch RemoteProjectRegistryError.invalidName {}
+        do {
+            _ = try await registry.create(name: "Wrong", directoryName: "wrong", parent: fixture.directory.path)
+            XCTFail("Unlisted parent must be rejected")
+        } catch RemoteProjectRegistryError.invalidParent {}
+        do {
+            _ = try await registry.create(name: "Duplicate", directoryName: "fresh-project", parent: parent.path)
+            XCTFail("Existing directory must not be reused")
+        } catch RemoteProjectRegistryError.alreadyExists {}
+    }
+
+    func testProjectCreationEndpointRegistersProjectForImmediateCodexUse() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let parent = fixture.directory.appendingPathComponent("Allowed", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        let projectsFile = fixture.directory.appendingPathComponent("projects.json")
+        try Data("[]\n".utf8).write(to: projectsFile)
+        let registry = RemoteProjectRegistry(
+            projects: [], creationRoots: [.init(name: "Allowed", path: parent.path)],
+            projectsFile: projectsFile.path
+        )
+        let jobs = RemoteClaudeJobService(
+            repository: fixture.repository, runner: StubClaudeRunner(), workingDirectory: fixture.directory.path
+        )
+        let app = try await Application.make(.testing)
+        configureApprovalHTTPRoutes(
+            app: app, service: fixture.service,
+            authorization: ApprovalHTTPAuthorization(token: fixture.token),
+            claudeService: jobs, agentRepository: fixture.repository, projectRegistry: registry
+        )
+        defer { Task { try? await app.asyncShutdown() } }
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: fixture.token)
+        headers.contentType = .json
+
+        let roots = try await app.sendRequest(.GET, "/api/remote/project-parents", headers: headers)
+        XCTAssertEqual(roots.status, .ok)
+        XCTAssertEqual(try roots.content.decode([RemoteProjectCreationRoot].self), [
+            .init(name: "Allowed", path: parent.path)
+        ])
+        let created = try await app.sendRequest(
+            .POST, "/api/remote/projects", headers: headers,
+            body: byteBuffer(#"{"name":"Fresh","directoryName":"fresh","parent":"\#(parent.path)"}"#)
+        )
+        XCTAssertEqual(created.status, .ok)
+        let project = try created.content.decode(RemoteProjectChoice.self)
+        XCTAssertEqual(project, .init(name: "Fresh", path: parent.appendingPathComponent("fresh").path))
+
+        let submitted = try await app.sendRequest(
+            .POST, "/codex/jobs", headers: headers,
+            body: byteBuffer(#"{"prompt":"Start","project":"\#(project.path)","conversation":"new"}"#)
+        )
+        XCTAssertEqual(submitted.status, .ok)
+        XCTAssertEqual(try submitted.content.decode(RemoteClaudeJobResponse.self).workingDirectory, project.path)
+
+        let traversal = try await app.sendRequest(
+            .POST, "/api/remote/projects", headers: headers,
+            body: byteBuffer(#"{"name":"Escape","directoryName":"../escape","parent":"\#(parent.path)"}"#)
+        )
+        XCTAssertEqual(traversal.status, .badRequest)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("escape").path))
+    }
+
     func testCodexHTTPEnablesModeOnlyAfterValidAuthenticatedMessage() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
@@ -823,6 +915,9 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(page.body.string.contains("document.addEventListener('visibilitychange'"))
         XCTAssertTrue(page.body.string.contains("Переключиться на новый чат"))
         XCTAssertTrue(page.body.string.contains("Новый чат доступен"))
+        XCTAssertTrue(page.body.string.contains("'existing:' + chat.id"))
+        XCTAssertTrue(page.body.string.contains("/api/remote/project-parents"))
+        XCTAssertTrue(page.body.string.contains("id=\"create-project\""))
 
         let cleared = try await app.sendRequest(.DELETE, "/codex/jobs", headers: headers)
         XCTAssertEqual(cleared.status, .ok)

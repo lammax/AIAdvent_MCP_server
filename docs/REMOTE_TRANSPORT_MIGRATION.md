@@ -41,7 +41,7 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 Updated 4 November 2026. Agent-aware channel switching, latest-chat selection,
 existing-chat delivery, task-state reporting, controlled cancellation and deferred
 signed updates are committed and installed. The current Remote test suite contains
-62 passing tests and both release products passed certificate-backed signature checks.
+64 passing tests and both release products passed certificate-backed signature checks.
 The deferred bootstrap installed commit `f45e026`; the installed MCP release tool then
 completed the normal post-bootstrap path for commit `47c46a7`. Both runs restarted
 HTTP healthy and preserved strict signatures. Repeated iPhone tasks completed in the selected Codex chat and returned
@@ -117,9 +117,17 @@ persistence across fresh processes.
    loaded them. A deterministic native desktop callback remains an optional future
    improvement; do not attach a blanket `UserPromptSubmit` mode-reset hook to
    synthetic/background events.
-5. **Chat selection and new projects.** Add a picker for any existing chat beyond
-   the implemented latest-chat continuation. Separately support creating a project
-   under an allowlisted parent directory.
+5. **Chat selection and new projects — implemented in source; configuration and
+   iPhone acceptance pending.** The PWA now lists every discovered chat for the
+   selected project and pins an explicitly chosen ID. Codex discovery collects all
+   paginated chat pages instead of stopping at the first relevant page. A dynamic
+   project registry can create one direct child directory beneath a parent explicitly
+   listed in `project-parents.json`, persist it atomically in `projects.json`, and use
+   it immediately without restarting HTTP. Traversal, unlisted parents, existing
+   paths, stale/foreign chat IDs, authentication and CSRF are enforced. Production is
+   configured to allow creation only directly beneath
+   `/Users/lammax/Documents/ThisIsMy/Programming/AI`; install and verify on the iPhone
+   before accepting this item.
 6. **Long-running approvals.** Investigate asynchronous resumption after the current
    wait expires, including restart/recovery; do not simply lengthen the timeout
    without confirming client behavior.

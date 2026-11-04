@@ -40,15 +40,25 @@ public protocol RemoteConversationsReading: Sendable {
 public actor RemoteConversationCatalog {
     private let reader: any RemoteConversationsReading
     private let repository: any RemoteClaudeJobRepository
-    private let projects: [RemoteProject]
+    private let projectRegistry: RemoteProjectRegistry
 
     public init(reader: any RemoteConversationsReading, repository: any RemoteClaudeJobRepository, projects: [RemoteProject]) {
-        self.reader = reader; self.repository = repository; self.projects = projects
+        self.reader = reader
+        self.repository = repository
+        self.projectRegistry = RemoteProjectRegistry(projects: projects)
+    }
+
+    public init(reader: any RemoteConversationsReading, repository: any RemoteClaudeJobRepository,
+                projectRegistry: RemoteProjectRegistry) {
+        self.reader = reader
+        self.repository = repository
+        self.projectRegistry = projectRegistry
     }
 
     public func list(agent: String, project: String) async throws -> [RemoteConversation] {
         guard ["codex", "claude"].contains(agent) else { throw RemoteConversationError.unavailable }
-        let canonical = try RemoteProject.resolve(project, in: projects)
+        let projects = await projectRegistry.projects()
+        let canonical = try await projectRegistry.resolve(project)
         let registered = projects.first { URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().standardizedFileURL.path == canonical }
         let paths = Set(([canonical] + (registered?.chatPaths ?? [])).filter { $0.hasPrefix("/") }
             .map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path })
@@ -69,6 +79,7 @@ public actor RemoteConversationCatalog {
     }
 
     public func projectChoices(agent: String) async throws -> [RemoteProjectChoice] {
+        let projects = await projectRegistry.projects()
         guard agent == "claude" else {
             return projects.map { RemoteProjectChoice(name: $0.name, path: $0.path) }
         }
@@ -262,6 +273,7 @@ public struct RemoteCLIConversationsReader: RemoteConversationsReading {
             try send(["id": 2, "method": "thread/list", "params": params])
         }
         var buffer = Data(); var total = 0; var pages = 0
+        var rows: [[String: Any]] = []
         while true {
             let chunk = output.fileHandleForReading.availableData
             if chunk.isEmpty { break }
@@ -277,11 +289,10 @@ public struct RemoteCLIConversationsReader: RemoteConversationsReading {
                     try requestPage()
                 } else if id == 2, let result = msg["result"] as? [String: Any] {
                     pages += 1
-                    let data = try JSONSerialization.data(withJSONObject: result)
-                    // Pages are newest first. Skip pages containing only diagnostics or
-                    // unrelated exec sessions, rather than choosing an older wrong chat.
-                    if !(try decodeCodex(data, knownRemoteIDs: knownRemoteIDs)).isEmpty { return data }
-                    guard let cursor = result["nextCursor"] as? String else { return data }
+                    rows.append(contentsOf: result["data"] as? [[String: Any]] ?? [])
+                    guard let cursor = result["nextCursor"] as? String else {
+                        return try JSONSerialization.data(withJSONObject: ["data": rows])
+                    }
                     guard pages < 20 else { throw RemoteConversationError.unavailable }
                     try requestPage(cursor: cursor)
                 }

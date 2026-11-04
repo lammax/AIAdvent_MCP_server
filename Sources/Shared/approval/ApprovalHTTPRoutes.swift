@@ -5,6 +5,7 @@ import Vapor
 extension RemoteProject: Content {}
 extension RemoteConversation: Content {}
 extension RemoteProjectChoice: Content {}
+extension RemoteProjectCreationRoot: Content {}
 extension RemoteAgentMode: Content {}
 
 public struct ApprovalHTTPAuthorization: Sendable {
@@ -145,6 +146,7 @@ public func configureApprovalHTTPRoutes(
     push: RemotePushHTTPContext? = nil,
     agentRepository: SQLiteApprovalRepository? = nil,
     projects: [RemoteProject] = [],
+    projectRegistry: RemoteProjectRegistry? = nil,
     usage: RemoteUsageService? = nil,
     conversations: RemoteConversationCatalog? = nil
 ) {
@@ -210,7 +212,30 @@ public func configureApprovalHTTPRoutes(
                 throw Abort(.serviceUnavailable, reason: RemoteConversationError.unavailable.localizedDescription)
             }
         }
-        return projects.map { RemoteProjectChoice(name: $0.name, path: $0.path) }
+        let currentProjects = await projectRegistry?.projects() ?? projects
+        return currentProjects.map { RemoteProjectChoice(name: $0.name, path: $0.path) }
+    }
+    app.get("api", "remote", "project-parents") { request async throws -> [RemoteProjectCreationRoot] in
+        try requireAuthorization(request, authorization: authorization)
+        return await projectRegistry?.creationRoots() ?? []
+    }
+    app.post("api", "remote", "projects") { request async throws -> RemoteProjectChoice in
+        try requireMutationAuthorization(request, authorization: authorization)
+        guard let projectRegistry else {
+            throw Abort(.serviceUnavailable, reason: RemoteProjectRegistryError.unavailable.localizedDescription)
+        }
+        let body = try request.content.decode(RemoteProjectCreateRequest.self)
+        do {
+            let project = try await projectRegistry.create(
+                name: body.name,
+                directoryName: body.directoryName,
+                parent: body.parent
+            )
+            return RemoteProjectChoice(name: project.name, path: project.path)
+        } catch let error as RemoteProjectRegistryError {
+            let status: HTTPResponseStatus = error == .alreadyExists ? .conflict : .badRequest
+            throw Abort(status, reason: error.localizedDescription)
+        }
     }
     app.get("api", "remote", "conversations") { request async throws -> [RemoteConversation] in
         try requireAuthorization(request, authorization: authorization)
@@ -242,7 +267,10 @@ public func configureApprovalHTTPRoutes(
         guard let claudeService else { throw Abort(.notFound) }
         let body = try request.content.decode(RemoteCodexSubmitRequest.self)
         let project: String
-        do { project = try RemoteProject.resolve(body.project, in: projects) }
+        do {
+            if let projectRegistry { project = try await projectRegistry.resolve(body.project) }
+            else { project = try RemoteProject.resolve(body.project, in: projects) }
+        }
         catch { throw Abort(.badRequest, reason: "Choose a registered project.") }
         let sessionID = try await selectedConversation(body.conversation, id: body.sessionID, agent: "codex", project: project, catalog: conversations)
         do {
@@ -416,7 +444,10 @@ public func configureApprovalHTTPRoutes(
         let body = try request.content.decode(RemoteClaudeSubmitRequest.self)
         let project: String?
         if let selected = body.project {
-            do { project = try RemoteProject.resolve(selected, in: projects) }
+            do {
+                if let projectRegistry { project = try await projectRegistry.resolve(selected) }
+                else { project = try RemoteProject.resolve(selected, in: projects) }
+            }
             catch { throw Abort(.badRequest, reason: "Choose a registered project.") }
         } else { project = nil }
         if body.conversation == "latest", project == nil { throw Abort(.badRequest, reason: "Select a project to continue a chat.") }
@@ -484,8 +515,10 @@ public func configureApprovalHTTPRoutes(
 
 private func selectedConversation(_ choice: String?, id: String?, agent: String, project: String,
                                   catalog: RemoteConversationCatalog?) async throws -> String? {
-    guard choice == nil || choice == "new" || choice == "latest" else { throw Abort(.badRequest) }
-    if choice != "latest" {
+    guard choice == nil || choice == "new" || choice == "latest" || choice == "existing" else {
+        throw Abort(.badRequest)
+    }
+    if choice == nil || choice == "new" {
         guard id == nil else { throw Abort(.badRequest, reason: "A new chat cannot have an existing session ID.") }
         return nil
     }
@@ -683,6 +716,12 @@ private struct RemoteCodexSubmitRequest: Content, Sendable {
     let project: String
     let conversation: String?
     let sessionID: String?
+}
+
+private struct RemoteProjectCreateRequest: Content, Sendable {
+    let name: String
+    let directoryName: String
+    let parent: String
 }
 
 public struct RemoteClaudeJobListResponse: Content, Sendable {
@@ -1159,6 +1198,17 @@ private enum ApprovalWebPage {
               <form id="prompt-form">
                 <label for="project">Project</label>
                 <select id="project" required><option value="">Choose a project…</option></select>
+                <details id="project-creator" hidden>
+                  <summary>Создать новый проект</summary>
+                  <label for="project-name">Название проекта</label>
+                  <input id="project-name" type="text" maxlength="100" autocomplete="off">
+                  <label for="project-directory">Имя папки</label>
+                  <input id="project-directory" type="text" maxlength="100" autocomplete="off">
+                  <label for="project-parent">Расположение</label>
+                  <select id="project-parent"></select>
+                  <button id="create-project" class="secondary" type="button">Создать проект</button>
+                  <p id="project-message" class="muted" aria-live="polite"></p>
+                </details>
                 <label for="conversation">Чат</label>
                 <select id="conversation"><option value="latest">Продолжить последний чат</option><option value="new">Новый чат</option></select>
                 <p id="chat-summary" class="muted" aria-live="polite">Выберите проект.</p>
@@ -1180,10 +1230,17 @@ private enum ApprovalWebPage {
           const csrfToken = '\(csrfToken)';
           const promptInput = document.getElementById('prompt');
           const projectInput = document.getElementById('project');
+          const projectCreator = document.getElementById('project-creator');
+          const projectNameInput = document.getElementById('project-name');
+          const projectDirectoryInput = document.getElementById('project-directory');
+          const projectParentInput = document.getElementById('project-parent');
+          const createProjectButton = document.getElementById('create-project');
+          const projectMessage = document.getElementById('project-message');
           const conversationInput = document.getElementById('conversation');
           const chatSummary = document.getElementById('chat-summary');
           const refreshChat = document.getElementById('refresh-chat');
           let selectedChat = null;
+          let availableChats = [];
           let pendingLatestChat = null;
           let chatRequest = 0;
           let conversationTimer = null;
@@ -1220,7 +1277,7 @@ private enum ApprovalWebPage {
           let submittingPrompt = false;
           function updateSendState() {
             sendButton.disabled = submittingPrompt || !projectInput.value ||
-              (conversationInput.value === 'latest' && !selectedChat);
+              (conversationInput.value !== 'new' && !selectedChat);
           }
           function describeChat(chat) {
             return chat.title + ' · ' + new Date(chat.updatedAt * 1000).toLocaleString() +
@@ -1235,6 +1292,18 @@ private enum ApprovalWebPage {
               ? describeChat(chat)
               : 'Рабочих чатов нет. Выберите «Новый чат».';
             updateSendState();
+          }
+          function populateConversationOptions(chats, selectedValue) {
+            [...conversationInput.options].slice(2).forEach(option => option.remove());
+            chats.forEach(chat => {
+              const option = new Option(chat.title + ' · ' + chat.id.slice(0, 8), 'existing:' + chat.id);
+              conversationInput.add(option);
+            });
+            if ([...conversationInput.options].some(option => option.value === selectedValue)) {
+              conversationInput.value = selectedValue;
+            } else {
+              conversationInput.value = 'latest';
+            }
           }
           async function loadConversation(options = {}) {
             const silent = options.silent === true;
@@ -1273,12 +1342,17 @@ private enum ApprovalWebPage {
               if (!response.ok) throw new Error();
               const chats = await response.json();
               if (sequence !== chatRequest) return;
+              availableChats = chats;
+              const previousChoice = conversationInput.value;
+              populateConversationOptions(chats, previousChoice);
               const requestedSession = projectInput.selectedOptions[0]?.dataset.sessionId;
-              const latest = ((!silent && requestedSession)
-                ? chats.find(chat => chat.id === requestedSession)
-                : chats[0]) || null;
+              const explicitID = conversationInput.value.startsWith('existing:')
+                ? conversationInput.value.slice('existing:'.length) : null;
+              const latest = (explicitID
+                ? chats.find(chat => chat.id === explicitID)
+                : ((!silent && requestedSession) ? chats.find(chat => chat.id === requestedSession) : chats[0])) || null;
               const hasDraft = promptInput.value.trim().length > 0 || submittingPrompt;
-              if (silent && latest && selectedChat && latest.id !== selectedChat.id &&
+              if (silent && conversationInput.value === 'latest' && latest && selectedChat && latest.id !== selectedChat.id &&
                   !allowDraftSwitch && hasDraft) {
                 pendingLatestChat = latest;
                 refreshChat.textContent = 'Переключиться на новый чат';
@@ -1312,7 +1386,11 @@ private enum ApprovalWebPage {
             pollLatestConversation();
           }
           document.addEventListener('visibilitychange', startConversationPolling);
-          projectInput.addEventListener('change', () => loadConversation());
+          projectInput.addEventListener('change', () => {
+            conversationInput.value = 'latest';
+            availableChats = [];
+            loadConversation();
+          });
           conversationInput.addEventListener('change', () => loadConversation());
           refreshChat.addEventListener('click', () => {
             if (pendingLatestChat) selectChat(pendingLatestChat);
@@ -1328,6 +1406,44 @@ private enum ApprovalWebPage {
               projectInput.add(option);
             }))
             .catch(() => { chatSummary.textContent = 'Unable to load registered projects.'; });
+          fetch('/api/remote/project-parents', {credentials:'same-origin'})
+            .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+            .then(parents => {
+              if (!parents.length) return;
+              parents.forEach(parent => projectParentInput.add(new Option(parent.name, parent.path)));
+              projectCreator.hidden = false;
+            })
+            .catch(() => {});
+          createProjectButton.addEventListener('click', async () => {
+            const name = projectNameInput.value.trim();
+            const directoryName = projectDirectoryInput.value.trim();
+            if (!name || !directoryName || !projectParentInput.value) {
+              projectMessage.textContent = 'Заполните название, папку и расположение.';
+              return;
+            }
+            createProjectButton.disabled = true;
+            projectMessage.textContent = 'Создаю проект…';
+            try {
+              const response = await fetch('/api/remote/projects', {
+                method:'POST', credentials:'same-origin',
+                headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrfToken},
+                body:JSON.stringify({name, directoryName, parent:projectParentInput.value})
+              });
+              const result = await response.json().catch(() => ({}));
+              if (!response.ok) throw new Error(result.reason || 'Не удалось создать проект.');
+              projectInput.add(new Option(result.name, result.path));
+              projectInput.value = result.path;
+              conversationInput.value = 'new';
+              projectNameInput.value = '';
+              projectDirectoryInput.value = '';
+              projectMessage.textContent = 'Проект создан и выбран.';
+              loadConversation();
+            } catch (error) {
+              projectMessage.textContent = error.message || 'Не удалось создать проект.';
+            } finally {
+              createProjectButton.disabled = false;
+            }
+          });
           startConversationPolling();
           let renderedJobs = null;
           const expandedJobOutputs = new Set();
@@ -1498,7 +1614,7 @@ private enum ApprovalWebPage {
           form.addEventListener('submit', async (event) => {
             event.preventDefault();
             if (submittingPrompt) return;
-            if (!projectInput.value || (conversationInput.value === 'latest' && !selectedChat)) return;
+            if (!projectInput.value || (conversationInput.value !== 'new' && !selectedChat)) return;
             const prompt = promptInput.value.trim();
             if (!prompt) return;
             submittingPrompt = true;
@@ -1509,8 +1625,10 @@ private enum ApprovalWebPage {
               const response = await fetch('/claude/jobs', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-                body: JSON.stringify({ prompt, project:projectInput.value, conversation:conversationInput.value,
-                  sessionID:conversationInput.value === 'latest' ? selectedChat.id : undefined })
+                body: JSON.stringify({ prompt, project:projectInput.value,
+                  conversation:conversationInput.value === 'new' ? 'new' :
+                    (conversationInput.value === 'latest' ? 'latest' : 'existing'),
+                  sessionID:conversationInput.value === 'new' ? undefined : selectedChat.id })
               });
               if (response.status === 401) { window.location = '/login'; return; }
               if (!response.ok) {

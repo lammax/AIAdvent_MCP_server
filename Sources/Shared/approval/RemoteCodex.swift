@@ -28,6 +28,131 @@ public struct RemoteProject: Codable, Sendable, Equatable {
     }
 }
 
+public struct RemoteProjectCreationRoot: Codable, Sendable, Equatable {
+    public let name: String
+    public let path: String
+
+    public init(name: String, path: String) {
+        self.name = name
+        self.path = path
+    }
+
+    public static func load(from path: String) throws -> [RemoteProjectCreationRoot] {
+        guard FileManager.default.fileExists(atPath: path) else { return [] }
+        return try JSONDecoder().decode(
+            [RemoteProjectCreationRoot].self,
+            from: Data(contentsOf: URL(fileURLWithPath: path))
+        )
+    }
+}
+
+public enum RemoteProjectRegistryError: LocalizedError, Equatable {
+    case unavailable, invalidName, invalidParent, alreadyExists
+
+    public var errorDescription: String? {
+        switch self {
+        case .unavailable: "Project creation is not configured."
+        case .invalidName: "Use a project name and a single directory name without slashes."
+        case .invalidParent: "Choose an allowed parent directory."
+        case .alreadyExists: "That project directory already exists."
+        }
+    }
+}
+
+public actor RemoteProjectRegistry {
+    private var registeredProjects: [RemoteProject]
+    private let roots: [RemoteProjectCreationRoot]
+    private let projectsFile: String?
+
+    public init(
+        projects: [RemoteProject],
+        creationRoots: [RemoteProjectCreationRoot] = [],
+        projectsFile: String? = nil
+    ) {
+        self.registeredProjects = projects
+        self.roots = creationRoots
+        self.projectsFile = projectsFile
+    }
+
+    public static func load(projectsPath: String, creationRootsPath: String) throws -> RemoteProjectRegistry {
+        try RemoteProjectRegistry(
+            projects: RemoteProject.load(from: projectsPath),
+            creationRoots: RemoteProjectCreationRoot.load(from: creationRootsPath),
+            projectsFile: projectsPath
+        )
+    }
+
+    public func projects() -> [RemoteProject] { registeredProjects }
+
+    public func creationRoots() -> [RemoteProjectCreationRoot] {
+        roots.filter { root in
+            var isDirectory: ObjCBool = false
+            return root.path.hasPrefix("/") &&
+                FileManager.default.fileExists(atPath: canonical(root.path), isDirectory: &isDirectory) &&
+                isDirectory.boolValue
+        }.map { RemoteProjectCreationRoot(name: $0.name, path: canonical($0.path)) }
+    }
+
+    public func resolve(_ path: String) throws -> String {
+        try RemoteProject.resolve(path, in: registeredProjects)
+    }
+
+    public func create(name rawName: String, directoryName rawDirectoryName: String, parent rawParent: String) throws -> RemoteProject {
+        guard let projectsFile else { throw RemoteProjectRegistryError.unavailable }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let directoryName = rawDirectoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 100, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !directoryName.isEmpty, directoryName.count <= 100,
+              directoryName != ".", directoryName != "..",
+              directoryName == URL(fileURLWithPath: directoryName).lastPathComponent,
+              !directoryName.contains("/"), !directoryName.contains(":")
+        else { throw RemoteProjectRegistryError.invalidName }
+
+        let parent = canonical(rawParent)
+        let allowed = creationRoots().contains { canonical($0.path) == parent }
+        guard allowed else { throw RemoteProjectRegistryError.invalidParent }
+        let parentURL = URL(fileURLWithPath: parent, isDirectory: true)
+        let targetURL = parentURL.appendingPathComponent(directoryName, isDirectory: true).standardizedFileURL
+        guard targetURL.deletingLastPathComponent().path == parent else {
+            throw RemoteProjectRegistryError.invalidName
+        }
+        guard !FileManager.default.fileExists(atPath: targetURL.path),
+              !registeredProjects.contains(where: { canonical($0.path) == targetURL.path })
+        else { throw RemoteProjectRegistryError.alreadyExists }
+
+        try FileManager.default.createDirectory(
+            at: targetURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o755]
+        )
+        let project = RemoteProject(name: name, path: targetURL.path)
+        let updated = registeredProjects + [project]
+        do {
+            var data = try JSONEncoder.remoteProjects.encode(updated)
+            data.append(0x0A)
+            try data.write(to: URL(fileURLWithPath: projectsFile), options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: projectsFile)
+            registeredProjects = updated
+            return project
+        } catch {
+            try? FileManager.default.removeItem(at: targetURL)
+            throw error
+        }
+    }
+
+    private nonisolated func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+}
+
+private extension JSONEncoder {
+    static var remoteProjects: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }
+}
+
 /// A per-run profile: git metadata is writable, while other workspace safeguards remain.
 public enum RemoteCodexPermissions {
     public static func httpsGitHost(_ remote: String) -> String? {
@@ -56,15 +181,18 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
     public let claude: ClaudeCLIRunner
     public let codexPath: String
     public let projects: [RemoteProject]
+    public let projectRegistry: RemoteProjectRegistry?
     public let conversations: RemoteConversationCatalog?
     public let repository: (any RemoteClaudeJobRepository)?
 
     public init(claude: ClaudeCLIRunner, codexPath: String, projects: [RemoteProject],
+                projectRegistry: RemoteProjectRegistry? = nil,
                 conversations: RemoteConversationCatalog? = nil,
                 repository: (any RemoteClaudeJobRepository)? = nil) {
         self.claude = claude
         self.codexPath = codexPath
         self.projects = projects
+        self.projectRegistry = projectRegistry
         self.conversations = conversations
         self.repository = repository
     }
@@ -87,7 +215,9 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             return try await claude.run(job: job)
         }
         guard job.agent == "codex" else { throw RemoteClaudeJobError.processFailed("Unknown agent.") }
-        let directory = try RemoteProject.resolve(job.workingDirectory, in: projects)
+        let directory: String
+        if let projectRegistry { directory = try await projectRegistry.resolve(job.workingDirectory) }
+        else { directory = try RemoteProject.resolve(job.workingDirectory, in: projects) }
         let prompt = Self.codexPrompt(job: job, directory: directory)
         if let retiredSessionID = job.sessionID,
            let selectedConversation,

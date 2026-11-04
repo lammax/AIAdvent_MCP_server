@@ -41,6 +41,23 @@ The `remote_mode` MCP tool reads/sets one agent's mode. Modes guide message rout
 The authenticated `/codex` page starts separate Codex CLI tasks in a selected existing project.
 The allowed project list is `~/Library/Application Support/Remote/projects.json` (objects with `name` and absolute `path`).
 Only those canonical directories are execution roots. `REMOTE_CODEX_PATH` can override the installed Codex CLI path.
+The iPhone chat picker lists all discovered chats for the selected project, not only
+the latest one. Creating a project from the PWA is disabled unless
+`~/Library/Application Support/Remote/project-parents.json` explicitly lists its
+allowed parent directory. Each entry contains `name` and an absolute `path`, for example:
+
+```json
+[
+  {
+    "name": "AI projects",
+    "path": "/Users/example/Documents/Programming/AI"
+  }
+]
+```
+
+Remote accepts only a single new directory component directly below one of these
+canonical parents, creates the directory, and immediately adds it to `projects.json`.
+Traversal, unlisted parents, existing paths, and cross-project chat IDs are rejected.
 Tasks use a Remote-only permission profile derived from `:workspace`, with explicit
 write access to the selected project's `.git`. `.codex`, `.agents`, and `.aws` remain
 read-only. Command network access uses Codex's network proxy and allows only the

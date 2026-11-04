@@ -16,12 +16,16 @@ enum RemoteHTTPServer {
 
         let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
         let remoteHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Remote")
-        let projects = try RemoteProject.load(from: remoteHome.appendingPathComponent("projects.json").path)
+        let projectRegistry = try RemoteProjectRegistry.load(
+            projectsPath: remoteHome.appendingPathComponent("projects.json").path,
+            creationRootsPath: remoteHome.appendingPathComponent("project-parents.json").path
+        )
+        let projects = await projectRegistry.projects()
         let codexPath = ProcessInfo.processInfo.environment["REMOTE_CODEX_PATH"]
             ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
         let conversations = RemoteConversationCatalog(
             reader: RemoteCLIConversationsReader(codexPath: codexPath, claudePath: configuration.claudeExecutablePath),
-            repository: repository, projects: projects
+            repository: repository, projectRegistry: projectRegistry
         )
         let approvalService = ApprovalService(
             repository: repository,
@@ -33,6 +37,7 @@ enum RemoteHTTPServer {
                 claude: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
                 codexPath: codexPath,
                 projects: projects,
+                projectRegistry: projectRegistry,
                 conversations: conversations,
                 repository: repository
             ),
@@ -88,6 +93,7 @@ enum RemoteHTTPServer {
             push: pushContext,
             agentRepository: repository,
             projects: projects,
+            projectRegistry: projectRegistry,
             usage: RemoteUsageService(reader: RemoteCLIUsageReader(
                 codexPath: codexPath, claudePath: configuration.claudeExecutablePath
             )),
