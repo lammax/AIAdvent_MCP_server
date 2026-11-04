@@ -28,3 +28,12 @@ verify that the working tree is clean and HEAD matches its upstream. Then call
 `mcp__remote__install_release` with the MCP_server project path. The trusted updater
 waits until the requesting task and the rest of the queue finish before installing
 both signed binaries. Never bypass it by writing the Remote runtime directory.
+
+Treat `queued` as accepted, not installed. Report the update request ID, then verify a
+later `completed` state in `~/Library/Application Support/Remote/release-update.json`,
+strict code signatures for both installed binaries, `/health`, and Git synchronization
+before reporting success. If the state is `failed`, report its stored error and the
+owner-only `~/Library/Logs/Remote/release-update.log`; do not silently retry. Current
+task cards can show queue/chat wait, running, human approval wait, permission blocking,
+interruption, completion, failure, and cancellation, and queued/running work can be
+stopped without rolling back changes already made.

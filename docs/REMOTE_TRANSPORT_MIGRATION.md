@@ -27,10 +27,10 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Automatic service lifecycle | **Implemented** | LaunchAgent startup, `/remote-start`, `/remote-status`, `/remote-stop`, `/remote-test`, and `/remote-push` |
 | Independent agent modes and request context | **Implemented; basic iPhone flow verified** | Persistent Claude/Codex modes; agent/project/chat metadata; incoming request filters; agent stop keeps the shared service alive. The full multi-agent stop/restart matrix remains to be checked. |
 | Switch agent mode by incoming message channel | **Implemented; desktop via agent instructions** | Valid web task submission and its agent mode are stored atomically. Desktop global rules/skills call an idempotent per-agent helper before handling a real user message. Explicit commands take priority; web workers carry a channel marker and cannot undo a later desktop switch. No unconditional native hook is installed; existing clients must load the updated rules. |
-| Codex tasks in existing projects | **Implemented and installed; iPhone E2E pending** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. New chats use the Remote-only permission profile. Existing chats use Codex's supported queue command and retain that chat's context and permissions. |
+| Codex tasks in existing projects | **Implemented, installed and iPhone verified** | Separate `/codex` page, registered projects, persisted results and latest-chat selection are active. Repeated iPhone tasks reached and completed in the selected existing chat, with their answers returned to the corresponding Remote cards. New chats use the Remote-only permission profile. |
 | Compact task cards | **Implemented; iPhone verified** | Long requests, answers and errors collapse independently and retain disclosure state on refresh. |
-| Task state and controlled stop | **Implemented; production install pending** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. Queued/running tasks can be stopped without rolling back changes already made. |
-| Signed deployment | **Implemented; deferred Remote path awaiting bootstrap** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. The MCP release tool validates a clean synchronized checkout, queues a detached updater, drains jobs, installs MCP then HTTP, and records durable status. One local install is required to bootstrap the new MCP schema/tool. |
+| Task state and controlled stop | **Implemented, installed and iPhone verified** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. An iPhone acceptance task was stopped from its card and persisted as `cancelled`; stopping does not roll back changes already made. |
+| Signed deployment | **Implemented; deferred bootstrap verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. Release `f45e026` drained its requesting task, installed signed MCP and HTTP binaries, restarted HTTP healthy, and recorded `completed`. The next release should exercise the installed MCP `install_release` entrypoint end to end. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
@@ -38,16 +38,15 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-Updated 4 November 2026. Agent-aware channel switching, latest-chat selection and
-existing-chat queue delivery are committed and installed. Task-state reporting and
-controlled cancellation are implemented in the working tree and await the next signed
-installation. The current Remote test suite contains 62 passing tests. The installed
-HTTP server was built with native SwiftPM in debug configuration; a release build of
-this latest baseline remains a separate validation item.
-Local health, bundled assets and SQLite checks passed. iPhone usage reports,
-duplicate-card suppression, task disclosure controls, Codex tasks and the BrainApp
-Git flow were verified. Full stop/restart, cancellation and concurrent-agent
-acceptance coverage remains incomplete.
+Updated 4 November 2026. Agent-aware channel switching, latest-chat selection,
+existing-chat delivery, task-state reporting, controlled cancellation and deferred
+signed updates are committed and installed. The current Remote test suite contains
+62 passing tests and both release products passed certificate-backed signature checks.
+The deferred bootstrap installed commit `f45e026`, restarted HTTP healthy and recorded
+`completed`. Repeated iPhone tasks completed in the selected Codex chat and returned
+their results to Remote. The iPhone stop button also cancelled and persisted a
+disposable task successfully. Full stop/restart and concurrent-agent acceptance
+coverage remains incomplete.
 
 ## Remaining product work
 
@@ -88,24 +87,25 @@ acceptance coverage remains incomplete.
 - The signed installer replaces resource bundles as a unit, preventing stale
   Contents/Resources assets from shadowing a newer native SwiftPM flat bundle.
 
-1. **Accept Codex queued continuation on the iPhone.** The signed HTTP server is
-   installed and healthy. Run an end-to-end iPhone-to-open-chat test and verify that
-   the message appears once in Codex Desktop and its answer returns to the same Remote
-   card. Automated coverage already verifies that a server restart after enqueue
-   resumes collection without replay.
-2. **Task visibility and controlled stop — implemented, install pending.** Task cards
+1. **Codex continuation on the iPhone — accepted for the selected existing-chat
+   flow.** Repeated iPhone requests produced one persisted job each in the requested
+   chat and returned completed answers to their Remote cards. Automated coverage also
+   verifies restart-after-enqueue collection without replay. A visual active-writer
+   queue check can be repeated after future Codex Desktop changes.
+2. **Task visibility and controlled stop — implemented, installed and accepted.** Task cards
    distinguish queued/running work, a busy selected chat, a linked human approval,
    permission/approval blocking, interruption, failure, completion and cancellation.
    Queued/running work can be stopped; active CLI processes receive an interrupt and
    bounded forced termination, linked pending approvals are cancelled, and existing
-   side effects are explicitly not rolled back. Fine-grained streamed progress is not
-   available from every provider and remains a possible later enhancement.
-3. **Controlled server updates — implemented, bootstrap pending.** An explicitly
+   side effects are explicitly not rolled back. Automated coverage passes, and an
+   iPhone acceptance task was stopped from its card and persisted as `cancelled`.
+3. **Controlled server updates — implemented and bootstrap verified.** An explicitly
    requested web task uses a trusted MCP tool rather than receiving runtime-directory
    access. The updater requires clean synchronized Git state and fresh release output,
    drains the queue, preserves signing, retains installer backups, installs HTTP last,
-   and records durable status/log output. Install this version locally once, refresh
-   MCP clients, then run the first deferred production acceptance test.
+   and records durable status/log output. Bootstrap release `f45e026` completed with
+   valid signatures and healthy HTTP. Exercise the installed MCP tool on the next
+   requested release to complete acceptance of the normal post-bootstrap entrypoint.
 4. **Desktop lifecycle verification.** Channel switching is implemented with an
    authoritative HTTP entrypoint and instruction-driven desktop preflight. Verify
    updated instructions in all existing Claude/Cursor chats. A deterministic native
