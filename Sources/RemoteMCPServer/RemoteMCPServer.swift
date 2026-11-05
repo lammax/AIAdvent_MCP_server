@@ -150,14 +150,14 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
             ),
             Tool(
                 name: "ask_user",
-                description: "Ask one or more questions in a single remote request. Each question can be single-select, multi-select, or free text. A lone free-text question requires an answer; free-text fields in a multi-question request are optional comments. Waits for the human response and never invents an answer. Prefer the questions array; legacy question/mode/options fields remain supported.",
+                description: "Ask one or more questions in a single remote request. Each question can be single-select, multi-select, or free text. A lone free-text question requires an answer; free-text fields in a multi-question request are optional comments. With task_id, a pending request survives the synchronous wait and server restart: retry with the same task_id and unchanged questions to resume it without another Push. Never invent an answer. Prefer the questions array; legacy question/mode/options fields remain supported.",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
                         "agent": .object(["type": .string("string"), "enum": .array([.string("codex"), .string("claude")])]),
                         "project": .object(["type": .string("string"), "maxLength": .int(1024), "description": .string("Absolute project directory; display context, not execution authority.")]),
                         "chat": .object(["type": .string("string"), "maxLength": .int(200), "description": .string("Originating chat ID or label.")]),
-                        "task_id": .object(["type": .string("string"), "format": .string("uuid"), "description": .string("Remote task UUID used to show waiting state on its task card.")]),
+                        "task_id": .object(["type": .string("string"), "format": .string("uuid"), "description": .string("Remote task UUID used for task-card state and durable resumption. Keep it and the questions unchanged when retrying a pending call.")]),
                         "questions": .object([
                             "type": .string("array"),
                             "minItems": .int(1),
@@ -273,8 +273,9 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
             } else {
                 source = nil
             }
-            let approval = try await service.createAndWait(
-                questions: try parseQuestions(arguments: params.arguments),
+            let questions = try parseQuestions(arguments: params.arguments)
+            let approval = try await service.createOrResumeAndWait(
+                questions: questions,
                 source: source
             )
             let answers = approval.questions.map {
@@ -292,9 +293,14 @@ private func makeRemoteMCPServer(service: ApprovalService, repository: SQLiteApp
                 response: approval.response,
                 responses: approval.responses
             )
-            let summary = answers.map {
-                "\($0.id): \($0.responses.joined(separator: ", "))"
-            }.joined(separator: "\n")
+            let summary: String
+            if approval.status == .pending {
+                summary = "Approval \(approval.id.uuidString) is still pending. Retry ask_user with the same task_id and unchanged questions to resume it; never invent an answer."
+            } else {
+                summary = answers.map {
+                    "\($0.id): \($0.responses.joined(separator: ", "))"
+                }.joined(separator: "\n")
+            }
             return try .init(
                 content: [
                     .text(
@@ -351,7 +357,12 @@ enum RemoteMCPServer {
             print("\(agent): \(enabled ? "enabled" : "disabled")")
             return
         }
-        let service = ApprovalService(repository: repository, timeout: configuration.timeout)
+        let service = ApprovalService(
+            repository: repository,
+            timeout: configuration.timeout,
+            resumableTimeout: configuration.resumableTimeout,
+            resumableWaitTimeout: configuration.resumableWaitTimeout
+        )
         let server = await makeRemoteMCPServer(service: service, repository: repository)
         let transport = RemoteMCPTransport(base: StdioTransport())
 

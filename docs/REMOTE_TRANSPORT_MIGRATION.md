@@ -32,23 +32,27 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Task state and controlled stop | **Implemented, installed and iPhone verified** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. An iPhone acceptance task was stopped from its card and persisted as `cancelled`; stopping does not roll back changes already made. |
 | Signed deployment | **Implemented and Remote E2E verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. After bootstrap, the installed MCP `install_release` tool queued commit `47c46a7`, drained its requesting task, installed signed MCP and HTTP binaries, restarted HTTP healthy, and recorded `completed`. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
+| Resumable long-running approvals | **Partial** | Task-linked approvals now separate their durable decision lifetime from one synchronous MCP wait, deduplicate retries atomically, and survive repository/MCP restart in automated tests. Production and live delayed-answer acceptance remain. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
 | Alternate ingress path | **Planned** | No Headscale, alternate overlay, reverse HTTPS tunnel, or managed access proxy is configured |
 | Carrier-restriction fallback | **Planned** | No SMS or voice approval channel exists |
 | Deferred security-hardening track | **Planned** | The current private-tailnet baseline remains in effect |
 
-Updated 4 November 2026. Agent-aware channel switching, latest-chat selection,
+Updated 5 November 2026. Agent-aware channel switching, latest-chat selection,
 existing-chat delivery, task-state reporting, controlled cancellation and deferred
 signed updates are committed and installed. The current Remote test suite contains
-64 passing tests and both release products passed certificate-backed signature checks.
+67 passing tests and both release products passed certificate-backed signature checks.
 The deferred bootstrap installed commit `f45e026`; the installed MCP release tool then
 completed the normal post-bootstrap path for commit `47c46a7`. Both runs restarted
 HTTP healthy and preserved strict signatures. Repeated iPhone tasks completed in the selected Codex chat and returned
 their results to Remote. The iPhone stop button also cancelled and persisted a
 disposable task successfully. The isolated desktop lifecycle matrix passed for both
 agents, including web preservation, desktop reset, explicit stop, independence, and
-persistence across fresh processes.
+persistence across fresh processes. Chat/project creation release `caea405` is installed;
+the user deferred its final visual acceptance on the physical iPhone. Resumable approval
+recovery is implemented with automated wait, retry, deduplication and restart coverage;
+live delayed-answer acceptance follows its production release.
 
 ## Remaining product work
 
@@ -117,8 +121,8 @@ persistence across fresh processes.
    loaded them. A deterministic native desktop callback remains an optional future
    improvement; do not attach a blanket `UserPromptSubmit` mode-reset hook to
    synthetic/background events.
-5. **Chat selection and new projects — implemented in source; configuration and
-   iPhone acceptance pending.** The PWA now lists every discovered chat for the
+5. **Chat selection and new projects — implemented and installed; physical-iPhone
+   visual acceptance deferred by the user.** The PWA now lists every discovered chat for the
    selected project and pins an explicitly chosen ID. Codex discovery collects all
    paginated chat pages instead of stopping at the first relevant page. A dynamic
    project registry can create one direct child directory beneath a parent explicitly
@@ -127,11 +131,18 @@ persistence across fresh processes.
    Traversal, unlisted parents, existing
    paths, stale/foreign chat IDs, authentication and CSRF are enforced. Production is
    configured to allow creation only directly beneath
-   `/Users/lammax/Documents/ThisIsMy/Programming/AI`; install and verify on the iPhone
-   before accepting this item.
-6. **Long-running approvals.** Investigate asynchronous resumption after the current
-   wait expires, including restart/recovery; do not simply lengthen the timeout
-   without confirming client behavior.
+   `/Users/lammax/Documents/ThisIsMy/Programming/AI`. Release `caea405` is installed
+   with healthy signed binaries; verify the complete flow on the physical iPhone before
+   accepting this item.
+6. **Long-running approvals — implemented; production and live delayed-answer
+   acceptance pending.** A task-linked `ask_user` now keeps a durable approval alive
+   independently of one bounded synchronous MCP wait. Retrying with the same `task_id`
+   and unchanged questions atomically resumes the same approval, returns an answer
+   saved during the interruption, and does not enqueue another Push. Cancellation of
+   the whole Remote task still cancels its linked pending approval. Automated tests
+   cover wait-window expiry, MCP-client cancellation, concurrent retries, one persisted
+   approval/Push event, and recovery through a freshly opened SQLite repository. After release, verify one
+   delayed iPhone answer across an MCP process restart before accepting this item.
 7. **Security hardening.** Follow the deferred track below, starting with Claude's
    permission bypass and per-device sessions. Complete the gate before public/shared ingress.
 8. **Transport independence.** Finish application/ingress diagnostics, then test an

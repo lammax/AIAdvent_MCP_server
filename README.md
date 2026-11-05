@@ -193,7 +193,9 @@ updates; certificate replacement or expiration requires a separate planned check
 | `REMOTE_TOKEN_FILE` | none | Preferred path to a file containing the access token. |
 | `REMOTE_VAPID_FILE` | `~/Library/Application Support/Remote/vapid.json` | Stable VAPID configuration with mode `600`. Never regenerate it during startup or upgrades. |
 | `REMOTE_DB_PATH` | `~/Library/Application Support/Remote/approval.sqlite` | SQLite database path. |
-| `REMOTE_TIMEOUT_SECONDS` | `300` | Maximum wait for a decision, from 1 to 3,600 seconds. |
+| `REMOTE_TIMEOUT_SECONDS` | `300` | Lifetime of an ordinary approval without `task_id`, from 1 to 3,600 seconds. |
+| `REMOTE_RESUMABLE_TIMEOUT_SECONDS` | `86400` | Lifetime of a task-linked resumable approval, from 300 to 604,800 seconds. |
+| `REMOTE_RESUMABLE_WAIT_SECONDS` | `240` | One synchronous MCP wait window before returning `pending`, from 1 to 3,600 seconds. |
 | `REMOTE_CLAUDE_PATH` | `~/.local/bin/claude` | Claude Code executable used by the remote task worker. |
 | `REMOTE_CLAUDE_WORKING_DIRECTORY` | `~/Documents/ThisIsMy/Programming/AI` | Working directory for remotely submitted Claude tasks. |
 
@@ -282,7 +284,15 @@ ask_user(
 )
 ```
 
-All questions are displayed in one iPhone form and submitted atomically. Selection types require options; text questions omit them. A text answer is required when it is the only question and is an optional comment when it appears in a multi-question request. Answers are returned in the original question order and matched by `id`; an omitted optional text answer has an empty `responses` array. The original `ask_user(question, options)` form and its optional `mode` remain supported for compatibility. Timeout, cancellation, validation, and persistence failures are explicit errors; the server never invents an answer.
+All questions are displayed in one iPhone form and submitted atomically. Selection types require options; text questions omit them. A text answer is required when it is the only question and is an optional comment when it appears in a multi-question request. Answers are returned in the original question order and matched by `id`; an omitted optional text answer has an empty `responses` array. The original `ask_user(question, options)` form and its optional `mode` remain supported for compatibility.
+
+When `task_id` is present, the approval is resumable. If one synchronous wait window
+ends or the MCP process restarts, the tool returns `pending` (or the client may observe
+its own cancellation) while the approval remains available on the iPhone. Retry with
+the same `task_id` and byte-for-byte equivalent question IDs, text, types and options;
+Remote atomically returns the same approval instead of creating another Push. An
+answer already saved during the interruption is returned on that retry. Stopping the
+Remote task cancels its linked pending approval. The server never invents an answer.
 
 The source files for the personal Claude Code commands live in `ClaudeSkills/`. Install them under `~/.claude/skills/` and restart an existing Claude Code session when the MCP schema changes. Codex-specific skill sources live in `CodexSkills/`; install them under `~/.codex/skills/`. `remote-mode` controls the Remote service, while `commit-push` makes an explicitly requested commit finish with a normal upstream push and synchronization check. Register the same stdio server in Codex with:
 

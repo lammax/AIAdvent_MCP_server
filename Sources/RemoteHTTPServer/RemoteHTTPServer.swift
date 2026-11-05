@@ -29,7 +29,9 @@ enum RemoteHTTPServer {
         )
         let approvalService = ApprovalService(
             repository: repository,
-            timeout: configuration.timeout
+            timeout: configuration.timeout,
+            resumableTimeout: configuration.resumableTimeout,
+            resumableWaitTimeout: configuration.resumableWaitTimeout
         )
         let claudeService = RemoteClaudeJobService(
             repository: repository,

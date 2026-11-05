@@ -1365,6 +1365,177 @@ final class RemoteTests: XCTestCase {
         }
     }
 
+    func testResumableApprovalSurvivesWaitAndRepositoryRestart() async throws {
+        let fixture = try makeFixture(
+            pollInterval: .milliseconds(5),
+            resumableTimeout: 5,
+            resumableWaitTimeout: 0.03
+        )
+        defer { fixture.remove() }
+        let questions = [
+            ApprovalQuestion(
+                id: "choice",
+                question: "Continue after restart?",
+                kind: .singleSelect,
+                options: ["Yes", "No"]
+            ),
+            ApprovalQuestion(
+                id: "comment",
+                question: "Comment",
+                kind: .text
+            ),
+        ]
+        let source = RemoteRequestSource(
+            agent: "codex",
+            project: fixture.directory.path,
+            chat: "chat-one",
+            taskID: UUID()
+        )
+
+        let pending = try await fixture.service.createOrResumeAndWait(
+            questions: questions,
+            source: source
+        )
+        XCTAssertEqual(pending.status, .pending)
+        XCTAssertGreaterThan(pending.expiresAt.timeIntervalSinceNow, 4)
+
+        let reopenedRepository = try SQLiteApprovalRepository(
+            path: fixture.directory.appendingPathComponent("approval.sqlite").path
+        )
+        let reopenedService = ApprovalService(
+            repository: reopenedRepository,
+            resumableTimeout: 5,
+            resumableWaitTimeout: 1,
+            pollInterval: .milliseconds(5)
+        )
+        async let resumed = reopenedService.createOrResumeAndWait(
+            questions: questions,
+            source: source
+        )
+        try await Task.sleep(for: .milliseconds(20))
+        _ = try await reopenedService.respond(
+            id: pending.id,
+            answers: [
+                ApprovalAnswer(id: "choice", responses: ["Yes"]),
+                ApprovalAnswer(id: "comment", responses: []),
+            ]
+        )
+        let answered = try await resumed
+
+        XCTAssertEqual(answered.id, pending.id)
+        XCTAssertEqual(answered.status, .answered)
+        XCTAssertEqual(answered.questions.map(\.responses), [["Yes"], []])
+        let remainingApprovals = try await reopenedService.pendingApprovals()
+        XCTAssertEqual(remainingApprovals.count, 0)
+    }
+
+    func testConcurrentResumableRetriesCreateOneApprovalAndOnePushEvent() async throws {
+        let fixture = try makeFixture(
+            pollInterval: .milliseconds(5),
+            resumableTimeout: 5,
+            resumableWaitTimeout: 0.03
+        )
+        defer { fixture.remove() }
+        let questions = [ApprovalQuestion(
+            id: "answer",
+            question: "Retry safely?",
+            kind: .singleSelect,
+            options: ["Yes", "No"]
+        )]
+        let source = RemoteRequestSource(
+            agent: "claude",
+            project: fixture.directory.path,
+            taskID: UUID()
+        )
+        _ = try await fixture.repository.upsertPushSubscription(
+            endpoint: "https://push.example/resumable-device",
+            p256dh: "device-key",
+            auth: "device-auth",
+            applicationServerKey: "vapid-key",
+            deviceLabel: nil,
+            now: Date()
+        )
+
+        async let first = fixture.service.createOrResumeAndWait(
+            questions: questions,
+            source: source
+        )
+        async let second = fixture.service.createOrResumeAndWait(
+            questions: questions,
+            source: source
+        )
+        let results = try await [first, second]
+
+        XCTAssertEqual(results[0].id, results[1].id)
+        let pendingApprovals = try await fixture.service.pendingApprovals()
+        let firstDelivery = try await fixture.repository.claimNextPushDelivery(
+            now: Date(),
+            leaseDuration: 30
+        )
+        let secondDelivery = try await fixture.repository.claimNextPushDelivery(
+            now: Date(),
+            leaseDuration: 30
+        )
+        XCTAssertEqual(pendingApprovals.count, 1)
+        XCTAssertNotNil(firstDelivery)
+        XCTAssertNil(secondDelivery)
+    }
+
+    func testCancellingResumableWaitKeepsApprovalForRetry() async throws {
+        let fixture = try makeFixture(
+            pollInterval: .milliseconds(5),
+            resumableTimeout: 5,
+            resumableWaitTimeout: 5
+        )
+        defer { fixture.remove() }
+        let questions = [ApprovalQuestion(
+            id: "answer",
+            question: "Resume after client cancellation?",
+            kind: .singleSelect,
+            options: ["Yes", "No"]
+        )]
+        let source = RemoteRequestSource(
+            agent: "codex",
+            project: fixture.directory.path,
+            taskID: UUID()
+        )
+        let waiting = Task {
+            try await fixture.service.createOrResumeAndWait(
+                questions: questions,
+                source: source
+            )
+        }
+
+        var pending: [Approval] = []
+        for _ in 0..<50 where pending.isEmpty {
+            pending = try await fixture.service.pendingApprovals()
+            if pending.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        let approval = try XCTUnwrap(pending.first)
+        waiting.cancel()
+        do {
+            _ = try await waiting.value
+            XCTFail("A cancelled resumable wait must throw CancellationError")
+        } catch is CancellationError {
+            // The durable approval intentionally remains pending.
+        }
+
+        let persisted = try await fixture.service.approval(id: approval.id)
+        XCTAssertEqual(persisted?.status, .pending)
+        let retryService = ApprovalService(
+            repository: fixture.repository,
+            resumableTimeout: 5,
+            resumableWaitTimeout: 0.03,
+            pollInterval: .milliseconds(5)
+        )
+        let retried = try await retryService.createOrResumeAndWait(
+            questions: questions,
+            source: source
+        )
+        XCTAssertEqual(retried.id, approval.id)
+        XCTAssertEqual(retried.status, .pending)
+    }
+
     func testCancellingWaitCancelsPersistedApproval() async throws {
         let fixture = try makeFixture(timeout: 5, pollInterval: .milliseconds(10))
         defer { fixture.remove() }
@@ -2226,7 +2397,9 @@ final class RemoteTests: XCTestCase {
 
     private func makeFixture(
         timeout: TimeInterval = 5,
-        pollInterval: Duration = .milliseconds(20)
+        pollInterval: Duration = .milliseconds(20),
+        resumableTimeout: TimeInterval = ApprovalService.defaultResumableTimeout,
+        resumableWaitTimeout: TimeInterval = ApprovalService.defaultResumableWaitTimeout
     ) throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("RemoteTests-\(UUID().uuidString)", isDirectory: true)
@@ -2237,6 +2410,8 @@ final class RemoteTests: XCTestCase {
             service: ApprovalService(
                 repository: repository,
                 timeout: timeout,
+                resumableTimeout: resumableTimeout,
+                resumableWaitTimeout: resumableWaitTimeout,
                 pollInterval: pollInterval
             ),
             repository: repository,

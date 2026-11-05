@@ -3,6 +3,8 @@ import Foundation
 public struct RemoteServiceConfiguration: Sendable {
     public let databasePath: String
     public let timeout: TimeInterval
+    public let resumableTimeout: TimeInterval
+    public let resumableWaitTimeout: TimeInterval
 
     public static func load(
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -17,11 +19,39 @@ public struct RemoteServiceConfiguration: Sendable {
             timeout = ApprovalService.defaultTimeout
         }
 
+        let resumableTimeout = try seconds(
+            environment["REMOTE_RESUMABLE_TIMEOUT_SECONDS"],
+            default: ApprovalService.defaultResumableTimeout,
+            name: "REMOTE_RESUMABLE_TIMEOUT_SECONDS",
+            range: 300...604_800
+        )
+        let resumableWaitTimeout = try seconds(
+            environment["REMOTE_RESUMABLE_WAIT_SECONDS"],
+            default: ApprovalService.defaultResumableWaitTimeout,
+            name: "REMOTE_RESUMABLE_WAIT_SECONDS",
+            range: 1...3_600
+        )
+
         return Self(
             databasePath: environment["REMOTE_DB_PATH"]
                 ?? SQLiteApprovalRepository.defaultDatabasePath(),
-            timeout: timeout
+            timeout: timeout,
+            resumableTimeout: resumableTimeout,
+            resumableWaitTimeout: resumableWaitTimeout
         )
+    }
+
+    private static func seconds(
+        _ rawValue: String?,
+        default defaultValue: TimeInterval,
+        name: String,
+        range: ClosedRange<TimeInterval>
+    ) throws -> TimeInterval {
+        guard let rawValue else { return defaultValue }
+        guard let value = Double(rawValue), range.contains(value) else {
+            throw RemoteConfigurationError.invalidValue(name)
+        }
+        return value
     }
 }
 
@@ -32,6 +62,8 @@ public struct RemoteHTTPConfiguration: Sendable {
     public let token: String
     public let databasePath: String
     public let timeout: TimeInterval
+    public let resumableTimeout: TimeInterval
+    public let resumableWaitTimeout: TimeInterval
     public let claudeExecutablePath: String
     public let claudeWorkingDirectory: String
     public let vapidConfigurationPath: String
@@ -120,6 +152,8 @@ public struct RemoteHTTPConfiguration: Sendable {
             token: token,
             databasePath: service.databasePath,
             timeout: service.timeout,
+            resumableTimeout: service.resumableTimeout,
+            resumableWaitTimeout: service.resumableWaitTimeout,
             claudeExecutablePath: claudeExecutablePath,
             claudeWorkingDirectory: claudeWorkingDirectory,
             vapidConfigurationPath: vapidConfigurationPath

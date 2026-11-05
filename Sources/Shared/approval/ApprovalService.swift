@@ -2,19 +2,27 @@ import Foundation
 
 public struct ApprovalService: Sendable {
     public static let defaultTimeout: TimeInterval = 300
+    public static let defaultResumableTimeout: TimeInterval = 86_400
+    public static let defaultResumableWaitTimeout: TimeInterval = 240
     public static let defaultPollInterval: Duration = .milliseconds(500)
 
     private let repository: any ApprovalRepository
     private let timeout: TimeInterval
+    private let resumableTimeout: TimeInterval
+    private let resumableWaitTimeout: TimeInterval
     private let pollInterval: Duration
 
     public init(
         repository: any ApprovalRepository,
         timeout: TimeInterval = ApprovalService.defaultTimeout,
+        resumableTimeout: TimeInterval = ApprovalService.defaultResumableTimeout,
+        resumableWaitTimeout: TimeInterval = ApprovalService.defaultResumableWaitTimeout,
         pollInterval: Duration = ApprovalService.defaultPollInterval
     ) {
         self.repository = repository
         self.timeout = timeout
+        self.resumableTimeout = resumableTimeout
+        self.resumableWaitTimeout = resumableWaitTimeout
         self.pollInterval = pollInterval
     }
 
@@ -42,15 +50,7 @@ public struct ApprovalService: Sendable {
         now: Date = Date(),
         source: RemoteRequestSource? = nil
     ) async throws -> Approval {
-        let normalizedQuestions = questions.map {
-            ApprovalQuestion(
-                id: $0.id.trimmingCharacters(in: .whitespacesAndNewlines),
-                question: $0.question.trimmingCharacters(in: .whitespacesAndNewlines),
-                kind: $0.kind,
-                options: $0.options.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            )
-        }
-        try validate(questions: normalizedQuestions)
+        let normalizedQuestions = try normalized(questions: questions)
 
         let approval = Approval(
             id: UUID(),
@@ -63,6 +63,31 @@ public struct ApprovalService: Sendable {
         )
         try await repository.create(approval)
         return approval
+    }
+
+    public func createOrResumeAndWait(
+        questions: [ApprovalQuestion],
+        source: RemoteRequestSource?,
+        now: Date = Date()
+    ) async throws -> Approval {
+        guard source?.taskID != nil else {
+            return try await createAndWait(questions: questions, source: source)
+        }
+        let normalizedQuestions = try normalized(questions: questions)
+        let candidate = Approval(
+            id: UUID(),
+            questions: normalizedQuestions,
+            status: .pending,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(resumableTimeout),
+            answeredAt: nil,
+            source: source
+        )
+        let approval = try await repository.createOrFindResumable(candidate, now: now)
+        return try await waitForResponse(
+            id: approval.id,
+            returnPendingAfter: resumableWaitTimeout
+        )
     }
 
     public func createAndWait(
@@ -97,6 +122,14 @@ public struct ApprovalService: Sendable {
     }
 
     public func waitForResponse(id: UUID) async throws -> Approval {
+        try await waitForResponse(id: id, returnPendingAfter: nil)
+    }
+
+    private func waitForResponse(
+        id: UUID,
+        returnPendingAfter waitTimeout: TimeInterval?
+    ) async throws -> Approval {
+        let waitDeadline = waitTimeout.map { Date().addingTimeInterval($0) }
         while true {
             try Task.checkCancellation()
             let now = Date()
@@ -113,6 +146,10 @@ public struct ApprovalService: Sendable {
                 throw ApprovalError.cancelled(id)
             case .pending:
                 break
+            }
+
+            if let waitDeadline, now >= waitDeadline {
+                return approval
             }
 
             try await Task.sleep(for: pollInterval)
@@ -160,6 +197,19 @@ public struct ApprovalService: Sendable {
 
     public func cancelPendingApprovals(taskID: UUID, now: Date = Date()) async throws {
         try await repository.cancelPendingApprovals(taskID: taskID, now: now)
+    }
+
+    private func normalized(questions: [ApprovalQuestion]) throws -> [ApprovalQuestion] {
+        let normalizedQuestions = questions.map {
+            ApprovalQuestion(
+                id: $0.id.trimmingCharacters(in: .whitespacesAndNewlines),
+                question: $0.question.trimmingCharacters(in: .whitespacesAndNewlines),
+                kind: $0.kind,
+                options: $0.options.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            )
+        }
+        try validate(questions: normalizedQuestions)
+        return normalizedQuestions
     }
 
     private func validate(questions: [ApprovalQuestion]) throws {

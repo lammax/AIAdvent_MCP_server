@@ -22,6 +22,12 @@ Report the resulting Claude mode concisely. It is independent of Codex; stopping
 
 When routing questions or reports through `mcp__remote__ask_user`, include `agent: "claude"`, `project` as the absolute current project directory, and the actual `chat` ID when available. When the current web task supplies a Remote task ID, also pass it as `task_id` so the task card shows that it is waiting for the user. Each request automatically queues Web Push. Never substitute the built-in PushNotification tool.
 
+If a task-linked `ask_user` returns `pending`, is cancelled by the MCP client, or is
+interrupted by an MCP restart, retry with the identical `task_id` and unchanged
+question IDs, text, types, ordering and options. Remote resumes the same durable
+approval and does not send another Push. Never change the request to manufacture a
+new approval, proceed without the answer, or invent a response.
+
 When the user explicitly requests a Remote production release from a web task, first
 run the relevant tests and release build, commit and push only when requested, and
 verify that the working tree is clean and HEAD matches its upstream. Then call
@@ -45,3 +51,8 @@ flow, task state/stop, controlled releases, and the instruction-driven desktop
 lifecycle) as completed only while the document and production checks still support
 that conclusion. Report remaining work from the numbered roadmap instead of reusing
 an older chat summary, and mention uncommitted roadmap or skill changes.
+
+When implementing, diagnosing, deploying, or documenting the Remote system itself in
+`/Users/lammax/Documents/ThisIsMy/Programming/AI/MCP_server`, read
+[references/system.md](references/system.md) before acting. Do not load that reference
+for ordinary channel switching, routine Remote replies, or unrelated project work.

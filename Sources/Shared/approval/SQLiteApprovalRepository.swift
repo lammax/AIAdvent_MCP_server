@@ -59,47 +59,30 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
     }
 
     public func create(_ approval: Approval) async throws {
-        let optionsJSON = try Self.encodeOptions(approval.options)
-        let responsesJSON = try Self.encodeOptions(approval.responses)
-        let questionsJSON = try Self.encode(approval.questions)
         try await dbQueue.write { db in
-            try db.execute(
-                sql: """
-                INSERT INTO approvals (
-                    id, question, kind, options_json, status, response, responses_json, questions_json,
-                    created_at, expires_at, answered_at, source_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                arguments: [
-                    approval.id.uuidString,
-                    approval.question,
-                    approval.kind.rawValue,
-                    optionsJSON,
-                    approval.status.rawValue,
-                    approval.response,
-                    responsesJSON,
-                    questionsJSON,
-                    approval.createdAt.timeIntervalSince1970,
-                    approval.expiresAt.timeIntervalSince1970,
-                    approval.answeredAt?.timeIntervalSince1970,
-                    try approval.source.map(Self.encode)
-                ]
-            )
-            let eventID = UUID()
-            try db.execute(
-                sql: """
-                INSERT INTO remote_push_outbox (
-                    id, event_key, kind, approval_id, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                arguments: [
-                    eventID.uuidString,
-                    "approval.created:\(approval.id.uuidString.lowercased())",
-                    RemotePushEventKind.approvalCreated.rawValue,
-                    approval.id.uuidString,
-                    approval.createdAt.timeIntervalSince1970,
-                ]
-            )
+            try Self.insertApproval(approval, db: db)
+        }
+    }
+
+    public func createOrFindResumable(_ approval: Approval, now: Date) async throws -> Approval {
+        try await dbQueue.write { db in
+            try Self.expirePendingApprovals(db: db, now: now)
+            if let source = approval.source, source.taskID != nil {
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM approvals WHERE source_json IS NOT NULL ORDER BY created_at DESC"
+                )
+                for row in rows {
+                    let existing = try Self.decodeApproval(row)
+                    if existing.source == source,
+                       Self.samePrompt(existing.questions, approval.questions)
+                    {
+                        return existing
+                    }
+                }
+            }
+            try Self.insertApproval(approval, db: db)
+            return approval
         }
     }
 
@@ -1092,6 +1075,59 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 now.timeIntervalSince1970
             ]
         )
+    }
+
+    private static func insertApproval(_ approval: Approval, db: Database) throws {
+        try db.execute(
+            sql: """
+            INSERT INTO approvals (
+                id, question, kind, options_json, status, response, responses_json, questions_json,
+                created_at, expires_at, answered_at, source_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                approval.id.uuidString,
+                approval.question,
+                approval.kind.rawValue,
+                try encodeOptions(approval.options),
+                approval.status.rawValue,
+                approval.response,
+                try encodeOptions(approval.responses),
+                try encode(approval.questions),
+                approval.createdAt.timeIntervalSince1970,
+                approval.expiresAt.timeIntervalSince1970,
+                approval.answeredAt?.timeIntervalSince1970,
+                try approval.source.map(encode),
+            ]
+        )
+        let eventID = UUID()
+        try db.execute(
+            sql: """
+            INSERT INTO remote_push_outbox (
+                id, event_key, kind, approval_id, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                eventID.uuidString,
+                "approval.created:\(approval.id.uuidString.lowercased())",
+                RemotePushEventKind.approvalCreated.rawValue,
+                approval.id.uuidString,
+                approval.createdAt.timeIntervalSince1970,
+            ]
+        )
+    }
+
+    private static func samePrompt(
+        _ lhs: [ApprovalQuestion],
+        _ rhs: [ApprovalQuestion]
+    ) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { left, right in
+            left.id == right.id
+                && left.question == right.question
+                && left.kind == right.kind
+                && left.options == right.options
+        }
     }
 
     private static func fetchApproval(db: Database, id: UUID) throws -> Approval? {
