@@ -932,6 +932,8 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(page.body.string.contains("/api/remote/project-parents"))
         XCTAssertTrue(page.body.string.contains("id=\"create-project\""))
         XCTAssertTrue(page.body.string.contains("id=\"create-project\" class=\"secondary composer-action\""))
+        XCTAssertTrue(page.body.string.contains("<summary class=\"secondary composer-action\">Создать новый проект</summary>"))
+        XCTAssertTrue(page.body.string.contains("summary.secondary.composer-action { display: flex;"))
         XCTAssertTrue(page.body.string.contains("id=\"refresh-chat\" class=\"secondary composer-action\""))
 
         let cleared = try await app.sendRequest(.DELETE, "/codex/jobs", headers: headers)

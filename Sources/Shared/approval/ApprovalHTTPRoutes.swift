@@ -1199,7 +1199,7 @@ private enum ApprovalWebPage {
                 <label for="project">Project</label>
                 <select id="project" required><option value="">Choose a project…</option></select>
                 <details id="project-creator" hidden>
-                  <summary>Создать новый проект</summary>
+                  <summary class="secondary composer-action">Создать новый проект</summary>
                   <label for="project-name">Название проекта</label>
                   <input id="project-name" type="text" maxlength="100" autocomplete="off">
                   <label for="project-directory">Имя папки</label>
@@ -1685,6 +1685,8 @@ private enum ApprovalWebPage {
     button:disabled { opacity: .55; }
     button.secondary { width: auto; min-height: 42px; margin: 0; background: #e2e8f0; color: #1e293b; }
     button.secondary.composer-action { width: 100%; min-height: 50px; margin-top: 16px; }
+    summary.secondary.composer-action { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 50px; margin-top: 16px; border-radius: 13px; padding: 12px 16px; background: #e2e8f0; color: #1e293b; font-size: 1rem; font-weight: 750; cursor: pointer; list-style: none; }
+    summary.secondary.composer-action::-webkit-details-marker { display: none; }
     button.secondary.danger { background: #fee2e2; color: #991b1b; }
     .history-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin: 18px 0 12px; }
     .history-toolbar .muted { flex: 1; margin: 0; }
@@ -1734,6 +1736,7 @@ private enum ApprovalWebPage {
       .muted { color: #94a3b8; }
       input[type=text], input[type=password], textarea, .option { border-color: #475569; background: #0f172a; color: #f8fafc; }
       button.secondary { background: #334155; color: #f8fafc; }
+      summary.secondary { background: #334155; color: #f8fafc; }
       .action-link { background: #334155; color: #f8fafc; }
       .job-response { background: #052e2b; color: #d1fae5; }
       .job-error { background: #450a0a; color: #fee2e2; }
