@@ -32,7 +32,7 @@ Status legend: **Implemented** is running in production and tested, **Partial** 
 | Task state and controlled stop | **Implemented, installed and iPhone verified** | Cards distinguish queued, busy-chat wait, running, waiting for a human, blocked, interrupted, failed, completed and cancelled work. An iPhone acceptance task was stopped from its card and persisted as `cancelled`; stopping does not roll back changes already made. |
 | Signed deployment | **Implemented and Remote E2E verified** | `remote-install` preserves the personal certificate identity, makes backups and refuses direct installation while jobs are active. After bootstrap, the installed MCP `install_release` tool queued commit `47c46a7`, drained its requesting task, installed signed MCP and HTTP binaries, restarted HTTP healthy, and recorded `completed`. |
 | Claude and Codex usage reports | **Implemented; iPhone verified** | Usage returns an answer in Remote's history with used/remaining percentages and reset times. Codex uses local app-server `account/rateLimits/read`; Claude uses its built-in `/usage` in print mode. No model task is queued and no provider login tokens are copied into Remote. A snapshot has a stable report ID, 30-second cache and 25-second query deadline. Only the newest Usage card per agent is displayed; older snapshots remain stored. |
-| Resumable long-running approvals | **Partial** | Task-linked approvals now separate their durable decision lifetime from one synchronous MCP wait, deduplicate retries atomically, and survive repository/MCP restart in automated tests. Production and live delayed-answer acceptance remain. |
+| Resumable long-running approvals | **Implemented; live restart acceptance verified** | A production MCP process returned `pending`; the iPhone answer persisted after that process exited, and a fresh process returned the same answer and request ID. SQLite held one approval and one Push event. |
 | Stable user-owned application origin | **Planned** | The current origin is the Tailscale-provided hostname |
 | Transport-independent diagnostics and ingress adapter | **Partial** | `REMOTE_PUBLIC_ORIGIN` exists, but health checks and skills still contain Tailscale-specific assumptions |
 | Alternate ingress path | **Planned** | No Headscale, alternate overlay, reverse HTTPS tunnel, or managed access proxy is configured |
@@ -52,7 +52,8 @@ agents, including web preservation, desktop reset, explicit stop, independence, 
 persistence across fresh processes. Chat/project creation release `caea405` is installed;
 the user deferred its final visual acceptance on the physical iPhone. Resumable approval
 recovery is implemented with automated wait, retry, deduplication and restart coverage;
-live delayed-answer acceptance follows its production release.
+live delayed-answer acceptance passed on the installed release using a two-second
+test wait window and a fresh MCP process; the default production wait remains 240 seconds.
 
 ## Remaining product work
 
@@ -134,15 +135,16 @@ live delayed-answer acceptance follows its production release.
    `/Users/lammax/Documents/ThisIsMy/Programming/AI`. Release `caea405` is installed
    with healthy signed binaries; verify the complete flow on the physical iPhone before
    accepting this item.
-6. **Long-running approvals — implemented; production and live delayed-answer
-   acceptance pending.** A task-linked `ask_user` now keeps a durable approval alive
+6. **Long-running approvals — implemented, installed and live restart acceptance
+   verified.** A task-linked `ask_user` now keeps a durable approval alive
    independently of one bounded synchronous MCP wait. Retrying with the same `task_id`
    and unchanged questions atomically resumes the same approval, returns an answer
    saved during the interruption, and does not enqueue another Push. Cancellation of
    the whole Remote task still cancels its linked pending approval. Automated tests
    cover wait-window expiry, MCP-client cancellation, concurrent retries, one persisted
-   approval/Push event, and recovery through a freshly opened SQLite repository. After release, verify one
-   delayed iPhone answer across an MCP process restart before accepting this item.
+   approval/Push event, and recovery through a freshly opened SQLite repository. A live
+   iPhone reply after a two-second test wait was recovered by a fresh installed MCP
+   process under the same task ID and request ID, with one approval and one Push event.
 7. **Security hardening.** Follow the deferred track below, starting with Claude's
    permission bypass and per-device sessions. Complete the gate before public/shared ingress.
 8. **Transport independence.** Finish application/ingress diagnostics, then test an

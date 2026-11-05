@@ -80,6 +80,6 @@ When persisted rollout history exceeds 25 MiB during a new Remote request:
 
 Read `docs/REMOTE_TRANSPORT_MIGRATION.md` before roadmap/status work and verify live state
 when deployment matters. Items 1–4 are accepted. Item 5 is installed with physical-iPhone
-visual acceptance deferred. Item 6 has durable approval retry/restart coverage but needs
-production and live delayed-answer acceptance. The next implementation tracks are security
+visual acceptance deferred. Item 6 passed live delayed-answer recovery across fresh
+installed MCP processes with one approval and one Push event. The next implementation tracks are security
 hardening and transport independence. Always disclose uncommitted roadmap or skill edits.
