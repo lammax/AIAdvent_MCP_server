@@ -96,6 +96,7 @@ enum RemoteHTTPServer {
             agentRepository: repository,
             projects: projects,
             projectRegistry: projectRegistry,
+            codexAppPath: codexPath,
             usage: RemoteUsageService(reader: RemoteCLIUsageReader(
                 codexPath: codexPath, claudePath: configuration.claudeExecutablePath
             )),

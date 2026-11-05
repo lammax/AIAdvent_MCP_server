@@ -58,6 +58,9 @@ allowed parent directory. Each entry contains `name` and an absolute `path`, for
 Remote accepts only a single new directory component directly below one of these
 canonical parents, creates the directory, initializes a Git repository with `main` as
 its initial branch, and immediately adds it to `projects.json`.
+The HTTP server then asks the installed Codex CLI to open the folder in Codex Desktop,
+so it also appears in the desktop project list. If that desktop handoff fails, the
+Remote project remains created and the server records a warning.
 Traversal, unlisted parents, existing paths, and cross-project chat IDs are rejected.
 Tasks use a Remote-only permission profile derived from `:workspace`, with explicit
 write access to the selected project's `.git`. `.codex`, `.agents`, and `.aws` remain

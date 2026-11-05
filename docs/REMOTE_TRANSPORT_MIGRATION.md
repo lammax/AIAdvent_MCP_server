@@ -137,6 +137,9 @@ test wait window and a fresh MCP process; the default production wait remains 24
    with healthy signed binaries. On the physical iPhone the user confirmed the larger
    creation button, chat list and selection, and successful project creation. The created
    directory and Git branch `main` were verified on the Mac.
+   The user's `LifeControl` folder was subsequently opened with `codex app` and appeared
+   in Codex Desktop. Source now performs the same desktop handoff after future Remote
+   project creation; release installation and acceptance of that automatic step remain.
 6. **Long-running approvals — implemented, installed and live restart acceptance
    verified.** A task-linked `ask_user` now keeps a durable approval alive
    independently of one bounded synchronous MCP wait. Retrying with the same `task_id`

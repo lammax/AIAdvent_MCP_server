@@ -52,6 +52,15 @@ lifecycle) as completed only while the document and production checks still supp
 that conclusion. Report remaining work from the numbered roadmap instead of reusing
 an older chat summary, and mention uncommitted roadmap or skill changes.
 
+For a user-requested continuation of a desktop Codex chat, resolve the destination
+project from that chat's actual Codex project and working directory, not a repository
+path inside its handoff or a Remote web task's target. Keep automatic web-task rotation
+scoped to the web task's registered project. Put the complete handoff produced by the
+source chat in the successor's first message; do not substitute a shorter paraphrase.
+If an existing successor cannot have its first message replaced, create a replacement
+chat with the full handoff as its initial message. Verify the new chat's project,
+working directory, and initial text before archiving an incorrect interim chat.
+
 When implementing, diagnosing, deploying, or documenting the Remote system itself in
 `/Users/lammax/Documents/ThisIsMy/Programming/AI/MCP_server`, read
 [references/system.md](references/system.md) before acting. Do not load that reference

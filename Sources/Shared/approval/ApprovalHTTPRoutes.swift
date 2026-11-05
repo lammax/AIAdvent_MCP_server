@@ -147,6 +147,7 @@ public func configureApprovalHTTPRoutes(
     agentRepository: SQLiteApprovalRepository? = nil,
     projects: [RemoteProject] = [],
     projectRegistry: RemoteProjectRegistry? = nil,
+    codexAppPath: String? = nil,
     usage: RemoteUsageService? = nil,
     conversations: RemoteConversationCatalog? = nil
 ) {
@@ -231,6 +232,18 @@ public func configureApprovalHTTPRoutes(
                 directoryName: body.directoryName,
                 parent: body.parent
             )
+            if let codexAppPath {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: codexAppPath)
+                process.arguments = ["app", project.path]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                } catch {
+                    request.logger.warning("Unable to open new project in Codex Desktop")
+                }
+            }
             return RemoteProjectChoice(name: project.name, path: project.path)
         } catch let error as RemoteProjectRegistryError {
             let status: HTTPResponseStatus = error == .alreadyExists ? .conflict : .badRequest

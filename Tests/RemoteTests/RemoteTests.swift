@@ -810,6 +810,10 @@ final class RemoteTests: XCTestCase {
             projects: [], creationRoots: [.init(name: "Allowed", path: parent.path)],
             projectsFile: projectsFile.path
         )
+        let codexInvocation = fixture.directory.appendingPathComponent("codex-app-invocation")
+        let codexStub = fixture.directory.appendingPathComponent("codex-stub")
+        try Data("#!/bin/sh\nprintf '%s\\n' \"$@\" > '\(codexInvocation.path)'\n".utf8).write(to: codexStub)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexStub.path)
         let jobs = RemoteClaudeJobService(
             repository: fixture.repository, runner: StubClaudeRunner(), workingDirectory: fixture.directory.path
         )
@@ -817,7 +821,8 @@ final class RemoteTests: XCTestCase {
         configureApprovalHTTPRoutes(
             app: app, service: fixture.service,
             authorization: ApprovalHTTPAuthorization(token: fixture.token),
-            claudeService: jobs, agentRepository: fixture.repository, projectRegistry: registry
+            claudeService: jobs, agentRepository: fixture.repository, projectRegistry: registry,
+            codexAppPath: codexStub.path
         )
         defer { Task { try? await app.asyncShutdown() } }
         var headers = HTTPHeaders()
@@ -836,6 +841,10 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(created.status, .ok)
         let project = try created.content.decode(RemoteProjectChoice.self)
         XCTAssertEqual(project, .init(name: "Fresh", path: parent.appendingPathComponent("fresh").path))
+        for _ in 0..<50 where !FileManager.default.fileExists(atPath: codexInvocation.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(try String(contentsOf: codexInvocation, encoding: .utf8), "app\n\(project.path)\n")
 
         let submitted = try await app.sendRequest(
             .POST, "/codex/jobs", headers: headers,
