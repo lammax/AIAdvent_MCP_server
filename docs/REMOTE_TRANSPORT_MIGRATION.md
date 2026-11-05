@@ -50,7 +50,8 @@ their results to Remote. The iPhone stop button also cancelled and persisted a
 disposable task successfully. The isolated desktop lifecycle matrix passed for both
 agents, including web preservation, desktop reset, explicit stop, independence, and
 persistence across fresh processes. Chat/project creation release `caea405` is installed;
-the user deferred its final visual acceptance on the physical iPhone. Resumable approval
+physical-iPhone acceptance confirmed the large creation button, project-scoped chat list,
+chat selection, successful project creation and Git initialization on `main`. Resumable approval
 recovery is implemented with automated wait, retry, deduplication and restart coverage;
 live delayed-answer acceptance passed on the installed release using a two-second
 test wait window and a fresh MCP process; the default production wait remains 240 seconds.
@@ -122,8 +123,8 @@ test wait window and a fresh MCP process; the default production wait remains 24
    loaded them. A deterministic native desktop callback remains an optional future
    improvement; do not attach a blanket `UserPromptSubmit` mode-reset hook to
    synthetic/background events.
-5. **Chat selection and new projects — implemented and installed; physical-iPhone
-   visual acceptance deferred by the user.** The PWA now lists every discovered chat for the
+5. **Chat selection and new projects — implemented, installed and iPhone accepted.**
+   The PWA now lists every discovered chat for the
    selected project and pins an explicitly chosen ID. Codex discovery collects all
    paginated chat pages instead of stopping at the first relevant page. A dynamic
    project registry can create one direct child directory beneath a parent explicitly
@@ -133,8 +134,9 @@ test wait window and a fresh MCP process; the default production wait remains 24
    paths, stale/foreign chat IDs, authentication and CSRF are enforced. Production is
    configured to allow creation only directly beneath
    `/Users/lammax/Documents/ThisIsMy/Programming/AI`. Release `caea405` is installed
-   with healthy signed binaries; verify the complete flow on the physical iPhone before
-   accepting this item.
+   with healthy signed binaries. On the physical iPhone the user confirmed the larger
+   creation button, chat list and selection, and successful project creation. The created
+   directory and Git branch `main` were verified on the Mac.
 6. **Long-running approvals — implemented, installed and live restart acceptance
    verified.** A task-linked `ask_user` now keeps a durable approval alive
    independently of one bounded synchronous MCP wait. Retrying with the same `task_id`
