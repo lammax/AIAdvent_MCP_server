@@ -37,6 +37,8 @@ enum RemoteHTTPServer {
             runner: RemoteAgentRunner(
                 claude: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
                 codexPath: codexPath,
+                mcpServerPath: configuration.mcpServerPath,
+                mcpDatabasePath: configuration.databasePath,
                 projects: projects,
                 projectRegistry: projectRegistry,
                 conversations: conversations,

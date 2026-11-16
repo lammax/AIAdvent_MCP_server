@@ -70,6 +70,7 @@ public struct RemoteHTTPConfiguration: Sendable {
     public let resumableWaitTimeout: TimeInterval
     public let claudeExecutablePath: String
     public let claudeWorkingDirectory: String
+    public let mcpServerPath: String
     public let vapidConfigurationPath: String
 
     public var usesSecureCookies: Bool {
@@ -145,6 +146,10 @@ public struct RemoteHTTPConfiguration: Sendable {
             string: environment["REMOTE_CLAUDE_WORKING_DIRECTORY"]
                 ?? home.appendingPathComponent("Documents/ThisIsMy/Programming/AI").path
         ).expandingTildeInPath
+        let mcpServerPath = NSString(
+            string: environment["REMOTE_MCP_SERVER_PATH"]
+                ?? URL(fileURLWithPath: dataDirectory).appendingPathComponent("bin/RemoteMCPServer").path
+        ).expandingTildeInPath
         let vapidConfigurationPath = NSString(
             string: environment["REMOTE_VAPID_FILE"]
                 ?? URL(fileURLWithPath: dataDirectory).appendingPathComponent("vapid.json").path
@@ -189,6 +194,7 @@ public struct RemoteHTTPConfiguration: Sendable {
             resumableWaitTimeout: service.resumableWaitTimeout,
             claudeExecutablePath: claudeExecutablePath,
             claudeWorkingDirectory: claudeWorkingDirectory,
+            mcpServerPath: mcpServerPath,
             vapidConfigurationPath: vapidConfigurationPath
         )
     }

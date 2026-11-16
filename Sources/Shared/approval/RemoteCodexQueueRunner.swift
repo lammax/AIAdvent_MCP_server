@@ -5,9 +5,27 @@ import Foundation
 /// app-server process polls persisted thread history for the matching result.
 struct RemoteCodexQueueRunner: Sendable {
     let codexPath: String
+    let mcpServerPath: String?
+    let mcpDatabasePath: String?
     let repository: any RemoteClaudeJobRepository
     var timeout: TimeInterval = 1_800
     var pollInterval: TimeInterval = 3
+
+    init(
+        codexPath: String,
+        mcpServerPath: String? = nil,
+        mcpDatabasePath: String? = nil,
+        repository: any RemoteClaudeJobRepository,
+        timeout: TimeInterval = 1_800,
+        pollInterval: TimeInterval = 3
+    ) {
+        self.codexPath = codexPath
+        self.mcpServerPath = mcpServerPath
+        self.mcpDatabasePath = mcpDatabasePath
+        self.repository = repository
+        self.timeout = timeout
+        self.pollInterval = pollInterval
+    }
 
     func run(job: RemoteClaudeJob, directory: String, prompt: String) async throws -> RemoteClaudeJobResult {
         guard let threadID = job.sessionID, UUID(uuidString: threadID) != nil else {
@@ -17,6 +35,8 @@ struct RemoteCodexQueueRunner: Sendable {
             if job.messageQueuedAt == nil {
                 try Self.queue(
                     executable: codexPath,
+                    mcpServerPath: mcpServerPath,
+                    mcpDatabasePath: mcpDatabasePath,
                     threadID: threadID,
                     directory: directory,
                     prompt: prompt
@@ -60,7 +80,14 @@ struct RemoteCodexQueueRunner: Sendable {
         }
     }
 
-    private static func queue(executable: String, threadID: String, directory: String, prompt: String) throws {
+    private static func queue(
+        executable: String,
+        mcpServerPath: String?,
+        mcpDatabasePath: String?,
+        threadID: String,
+        directory: String,
+        prompt: String
+    ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.currentDirectoryURL = URL(fileURLWithPath: directory)
@@ -70,6 +97,10 @@ struct RemoteCodexQueueRunner: Sendable {
         process.arguments = [
             "queue", "-C", directory,
             "-c", "mcp_servers.remote.required=true",
+        ] + RemoteCodexMCPConfiguration.overrides(
+            serverPath: mcpServerPath,
+            databasePath: mcpDatabasePath
+        ) + [
             "--thread", threadID,
             "--message", prompt,
             "--resume",

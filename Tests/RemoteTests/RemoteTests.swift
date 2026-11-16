@@ -114,6 +114,18 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(RemoteAgentRunner.codexPrompt(job: newChat, directory: project).contains("chat=\"new\""))
     }
 
+    func testCodexMCPConfigurationOverridesUseDedicatedServerAndDatabase() {
+        let overrides = RemoteCodexMCPConfiguration.overrides(
+            serverPath: "/Users/test/Library/Application Support/EnergyBotRemote/bin/RemoteMCPServer",
+            databasePath: "/Users/test/Library/Application Support/EnergyBotRemote/approval.sqlite"
+        )
+        XCTAssertEqual(overrides, [
+            "-c", "mcp_servers.remote.command=\"/Users/test/Library/Application Support/EnergyBotRemote/bin/RemoteMCPServer\"",
+            "-c", "mcp_servers.remote.args=[\"--stdio\"]",
+            "-c", "mcp_servers.remote.env.REMOTE_DB_PATH=\"/Users/test/Library/Application Support/EnergyBotRemote/approval.sqlite\"",
+        ])
+    }
+
     func testCodexCatalogReadsHistorySizeAndExcludesRetiredConversation() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }

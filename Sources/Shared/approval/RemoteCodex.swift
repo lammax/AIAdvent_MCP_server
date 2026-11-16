@@ -199,17 +199,22 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
     static let codexRotationThresholdBytes: Int64 = 25 * 1_024 * 1_024
     public let claude: ClaudeCLIRunner
     public let codexPath: String
+    public let mcpServerPath: String?
+    public let mcpDatabasePath: String?
     public let projects: [RemoteProject]
     public let projectRegistry: RemoteProjectRegistry?
     public let conversations: RemoteConversationCatalog?
     public let repository: (any RemoteClaudeJobRepository)?
 
-    public init(claude: ClaudeCLIRunner, codexPath: String, projects: [RemoteProject],
+    public init(claude: ClaudeCLIRunner, codexPath: String, mcpServerPath: String? = nil,
+                mcpDatabasePath: String? = nil, projects: [RemoteProject],
                 projectRegistry: RemoteProjectRegistry? = nil,
                 conversations: RemoteConversationCatalog? = nil,
                 repository: (any RemoteClaudeJobRepository)? = nil) {
         self.claude = claude
         self.codexPath = codexPath
+        self.mcpServerPath = mcpServerPath
+        self.mcpDatabasePath = mcpDatabasePath
         self.projects = projects
         self.projectRegistry = projectRegistry
         self.conversations = conversations
@@ -244,6 +249,8 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             guard let repository else { throw RemoteConversationError.unavailable }
             let summary = try await RemoteCodexQueueRunner(
                 codexPath: codexPath,
+                mcpServerPath: mcpServerPath,
+                mcpDatabasePath: mcpDatabasePath,
                 repository: repository
             ).run(
                 job: job,
@@ -260,7 +267,12 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
         if let sessionID = job.sessionID {
             guard let repository else { throw RemoteConversationError.unavailable }
             if job.messageQueuedAt != nil {
-                return try await RemoteCodexQueueRunner(codexPath: codexPath, repository: repository)
+                return try await RemoteCodexQueueRunner(
+                    codexPath: codexPath,
+                    mcpServerPath: mcpServerPath,
+                    mcpDatabasePath: mcpDatabasePath,
+                    repository: repository
+                )
                     .run(job: job, directory: directory, prompt: prompt)
             }
             do {
@@ -275,7 +287,12 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             } catch RemoteConversationError.busy {
                 // An open desktop chat owns the rollout writer. Queueing is the supported
                 // way to hand the task to that owner without competing for the transcript.
-                return try await RemoteCodexQueueRunner(codexPath: codexPath, repository: repository)
+                return try await RemoteCodexQueueRunner(
+                    codexPath: codexPath,
+                    mcpServerPath: mcpServerPath,
+                    mcpDatabasePath: mcpDatabasePath,
+                    repository: repository
+                )
                     .run(job: job, directory: directory, prompt: prompt)
             }
         }
@@ -325,6 +342,10 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 "-c", "approval_policy=\"never\"",
                 "-c", "mcp_servers.remote.required=true"
                 ]
+                + RemoteCodexMCPConfiguration.overrides(
+                    serverPath: mcpServerPath,
+                    databasePath: mcpDatabasePath
+                )
                 + (resumeSessionID.map { ["resume", $0] } ?? ["--thread-source", "remote"])
                 + ["--skip-git-repo-check", "--json", "--output-last-message", outputURL.path,
                    "--", prompt]
