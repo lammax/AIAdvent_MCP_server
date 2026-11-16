@@ -62,6 +62,9 @@ public struct RemoteHTTPConfiguration: Sendable {
     public let token: String
     public let bridgeToken: String?
     public let databasePath: String
+    public let dataDirectory: String
+    public let projectsPath: String
+    public let creationRootsPath: String
     public let timeout: TimeInterval
     public let resumableTimeout: TimeInterval
     public let resumableWaitTimeout: TimeInterval
@@ -80,7 +83,18 @@ public struct RemoteHTTPConfiguration: Sendable {
     public static func load(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> Self {
-        let service = try RemoteServiceConfiguration.load(environment: environment)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let defaultDataDirectory = home.appendingPathComponent("Library/Application Support/Remote").path
+        let dataDirectory = NSString(
+            string: environment["REMOTE_DATA_DIR"]
+                ?? defaultDataDirectory
+        ).expandingTildeInPath
+        var serviceEnvironment = environment
+        if serviceEnvironment["REMOTE_DB_PATH"] == nil {
+            serviceEnvironment["REMOTE_DB_PATH"] = URL(fileURLWithPath: dataDirectory)
+                .appendingPathComponent("approval.sqlite").path
+        }
+        let service = try RemoteServiceConfiguration.load(environment: serviceEnvironment)
         let host = environment["REMOTE_HOST"] ?? "127.0.0.1"
         guard isAllowedHost(host) else {
             throw RemoteConfigurationError.disallowedHost
@@ -115,7 +129,14 @@ public struct RemoteHTTPConfiguration: Sendable {
             environment: environment
         )
 
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let projectsPath = NSString(
+            string: environment["REMOTE_PROJECTS_FILE"]
+                ?? URL(fileURLWithPath: dataDirectory).appendingPathComponent("projects.json").path
+        ).expandingTildeInPath
+        let creationRootsPath = NSString(
+            string: environment["REMOTE_PROJECT_PARENTS_FILE"]
+                ?? URL(fileURLWithPath: dataDirectory).appendingPathComponent("project-parents.json").path
+        ).expandingTildeInPath
         let claudeExecutablePath = NSString(
             string: environment["REMOTE_CLAUDE_PATH"]
                 ?? home.appendingPathComponent(".local/bin/claude").path
@@ -126,10 +147,7 @@ public struct RemoteHTTPConfiguration: Sendable {
         ).expandingTildeInPath
         let vapidConfigurationPath = NSString(
             string: environment["REMOTE_VAPID_FILE"]
-                ?? home
-                    .appendingPathComponent("Library/Application Support/Remote")
-                    .appendingPathComponent("vapid.json")
-                    .path
+                ?? URL(fileURLWithPath: dataDirectory).appendingPathComponent("vapid.json").path
         ).expandingTildeInPath
 
         var isDirectory: ObjCBool = false
@@ -163,6 +181,9 @@ public struct RemoteHTTPConfiguration: Sendable {
             token: token,
             bridgeToken: bridgeToken,
             databasePath: service.databasePath,
+            dataDirectory: dataDirectory,
+            projectsPath: projectsPath,
+            creationRootsPath: creationRootsPath,
             timeout: service.timeout,
             resumableTimeout: service.resumableTimeout,
             resumableWaitTimeout: service.resumableWaitTimeout,

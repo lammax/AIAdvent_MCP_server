@@ -196,8 +196,11 @@ updates; certificate replacement or expiration requires a separate planned check
 | `REMOTE_TOKEN_FILE` | none | Preferred path to a file containing the access token. |
 | `REMOTE_BRIDGE_TOKEN` | none | Dedicated bearer token for trusted local EnergyBot clients. At least 32 characters. |
 | `REMOTE_BRIDGE_TOKEN_FILE` | none | Preferred path to the dedicated bridge token. The bridge is disabled when neither bridge variable is set. |
-| `REMOTE_VAPID_FILE` | `~/Library/Application Support/Remote/vapid.json` | Stable VAPID configuration with mode `600`. Never regenerate it during startup or upgrades. |
-| `REMOTE_DB_PATH` | `~/Library/Application Support/Remote/approval.sqlite` | SQLite database path. |
+| `REMOTE_DATA_DIR` | `~/Library/Application Support/Remote` | Data directory used for the project registry, default VAPID file, and the default SQLite database. Set a different directory to run an isolated Remote instance. |
+| `REMOTE_PROJECTS_FILE` | `$REMOTE_DATA_DIR/projects.json` | Registered project list for this Remote instance. |
+| `REMOTE_PROJECT_PARENTS_FILE` | `$REMOTE_DATA_DIR/project-parents.json` | Allowed project-creation roots for this Remote instance. |
+| `REMOTE_VAPID_FILE` | `$REMOTE_DATA_DIR/vapid.json` | Stable VAPID configuration with mode `600`. Never regenerate it during startup or upgrades. |
+| `REMOTE_DB_PATH` | `$REMOTE_DATA_DIR/approval.sqlite` | SQLite database path. |
 | `REMOTE_TIMEOUT_SECONDS` | `300` | Lifetime of an ordinary approval without `task_id`, from 1 to 3,600 seconds. |
 | `REMOTE_RESUMABLE_TIMEOUT_SECONDS` | `86400` | Lifetime of a task-linked resumable approval, from 300 to 604,800 seconds. |
 | `REMOTE_RESUMABLE_WAIT_SECONDS` | `240` | One synchronous MCP wait window before returning `pending`, from 1 to 3,600 seconds. |
@@ -219,10 +222,9 @@ Do not place the token in this repository, command history, URLs, logs, or scree
 
 When `REMOTE_BRIDGE_TOKEN` or `REMOTE_BRIDGE_TOKEN_FILE` is configured and
 `REMOTE_HOST` is loopback, `RemoteHTTPServer` enables a machine-facing API on the
-same loopback listener.
-It reuses the existing `RemoteClaudeJobService`, SQLite queue, approvals, project
-allowlist, Codex/Claude runners, and cancellation behavior; it does not start a
-second worker or expose a second port.
+same loopback listener. To run an isolated bridge instance alongside the main
+Remote, give it a different `REMOTE_DATA_DIR`, `REMOTE_DB_PATH`, `REMOTE_PORT`,
+token files, and project registry. The default configuration remains unchanged.
 
 The API is intended for the local EnergyBot process:
 

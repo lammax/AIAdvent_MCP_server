@@ -69,6 +69,33 @@ public struct RemoteBridgeHealthResponse: Content, Sendable {
     }
 }
 
+public struct RemoteBridgeProjectResponse: Content, Sendable {
+    public let name: String
+    public let path: String
+
+    public init(_ project: RemoteProject) {
+        name = project.name
+        path = project.path
+    }
+}
+
+public struct RemoteBridgeUsageResponse: Content, Sendable {
+    public let agent: String
+    public let text: String
+    public let fetchedAt: Date
+
+    public init(agent: String, report: RemoteUsageReport) {
+        self.agent = agent
+        text = report.text
+        fetchedAt = report.fetchedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case agent, text
+        case fetchedAt = "fetched_at"
+    }
+}
+
 /// Machine-facing bridge for trusted local clients such as EnergyBot.
 /// It deliberately shares the existing RemoteClaudeJobService worker, queue,
 /// approvals, and SQLite repository with RemoteHTTPServer.
@@ -79,7 +106,8 @@ public func configureRemoteBridgeHTTPRoutes(
     authorization: ApprovalHTTPAuthorization,
     projects: [RemoteProject],
     projectRegistry: RemoteProjectRegistry?,
-    conversations: RemoteConversationCatalog?
+    conversations: RemoteConversationCatalog?,
+    usage: RemoteUsageService? = nil
 ) {
     @Sendable func requireBridgeAuthorization(_ request: Request) throws {
         guard authorization.isBearerAuthorized(request) else {
@@ -130,6 +158,33 @@ public func configureRemoteBridgeHTTPRoutes(
     app.get("v1", "health") { request async throws -> RemoteBridgeHealthResponse in
         try requireBridgeAuthorization(request)
         return RemoteBridgeHealthResponse()
+    }
+
+    app.get("v1", "projects") { request async throws -> [RemoteBridgeProjectResponse] in
+        try requireBridgeAuthorization(request)
+        let agent = request.query[String.self, at: "agent"] ?? "codex"
+        guard ["codex", "claude"].contains(agent) else {
+            throw Abort(.badRequest, reason: "agent must be codex or claude.")
+        }
+        let available = await projectRegistry?.projects() ?? projects
+        var seen = Set<String>()
+        return available.compactMap { project in
+            guard seen.insert(project.path).inserted else { return nil }
+            return RemoteBridgeProjectResponse(project)
+        }
+    }
+
+    app.get("v1", "usage") { request async throws -> RemoteBridgeUsageResponse in
+        try requireBridgeAuthorization(request)
+        let agent = request.query[String.self, at: "agent"] ?? "codex"
+        guard let usage else {
+            throw Abort(.serviceUnavailable, reason: "Usage is not configured.")
+        }
+        do {
+            return RemoteBridgeUsageResponse(agent: agent, report: try await usage.report(agent: agent))
+        } catch {
+            throw Abort(.serviceUnavailable, reason: RemoteUsageError.unavailable.localizedDescription)
+        }
     }
 
     app.post("v1", "jobs") { request async throws -> RemoteBridgeJobResponse in

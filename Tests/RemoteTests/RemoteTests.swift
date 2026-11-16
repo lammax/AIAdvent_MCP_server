@@ -5,6 +5,12 @@ import XCTest
 import XCTVapor
 @testable import Shared
 
+private struct BridgeUsageReader: RemoteUsageReading {
+    func read(agent: String) async throws -> RemoteUsageReport {
+        RemoteUsageReport(text: "Codex — лимиты аккаунта\n5 часов: осталось 80%.")
+    }
+}
+
 final class RemoteTests: XCTestCase {
     func testConversationCatalogScopesProjectAndSortsActivity() async throws {
         let fixture = try makeFixture()
@@ -881,7 +887,8 @@ final class RemoteTests: XCTestCase {
             authorization: ApprovalHTTPAuthorization(token: bridgeToken),
             projects: [RemoteProject(name: "Test", path: project)],
             projectRegistry: nil,
-            conversations: nil
+            conversations: nil,
+            usage: RemoteUsageService(reader: BridgeUsageReader())
         )
 
         let unauthorized = try await app.sendRequest(.GET, "/v1/health")
@@ -894,6 +901,16 @@ final class RemoteTests: XCTestCase {
         let health = try await app.sendRequest(.GET, "/v1/health", headers: headers)
         XCTAssertEqual(health.status, .ok)
         XCTAssertEqual(try health.content.decode(RemoteBridgeHealthResponse.self).bridge, "remote-agent")
+
+        let projectList = try await app.sendRequest(.GET, "/v1/projects?agent=codex", headers: headers)
+        XCTAssertEqual(projectList.status, .ok)
+        let projects = try projectList.content.decode([RemoteBridgeProjectResponse].self)
+        XCTAssertEqual(projects.map(\.path), [project])
+
+        let usage = try await app.sendRequest(.GET, "/v1/usage?agent=codex", headers: headers)
+        XCTAssertEqual(usage.status, .ok)
+        XCTAssertEqual(try usage.content.decode(RemoteBridgeUsageResponse.self).text,
+                       "Codex — лимиты аккаунта\n5 часов: осталось 80%.")
 
         let submitted = try await app.sendRequest(
             .POST,

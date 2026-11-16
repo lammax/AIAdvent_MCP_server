@@ -15,10 +15,9 @@ enum RemoteHTTPServer {
         app.http.server.configuration.port = configuration.port
 
         let repository = try SQLiteApprovalRepository(path: configuration.databasePath)
-        let remoteHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Remote")
         let projectRegistry = try RemoteProjectRegistry.load(
-            projectsPath: remoteHome.appendingPathComponent("projects.json").path,
-            creationRootsPath: remoteHome.appendingPathComponent("project-parents.json").path
+            projectsPath: configuration.projectsPath,
+            creationRootsPath: configuration.creationRootsPath
         )
         let projects = await projectRegistry.projects()
         let codexPath = ProcessInfo.processInfo.environment["REMOTE_CODEX_PATH"]
@@ -111,7 +110,10 @@ enum RemoteHTTPServer {
                 authorization: ApprovalHTTPAuthorization(token: bridgeToken),
                 projects: projects,
                 projectRegistry: projectRegistry,
-                conversations: conversations
+                conversations: conversations,
+                usage: RemoteUsageService(reader: RemoteCLIUsageReader(
+                    codexPath: codexPath, claudePath: configuration.claudeExecutablePath
+                ))
             )
             app.logger.info("Remote Agent Bridge is enabled on the local HTTP server.")
         } else if configuration.bridgeToken != nil {
