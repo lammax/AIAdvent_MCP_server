@@ -30,11 +30,12 @@ public struct RemoteBridgeJobResponse: Content, Sendable {
     public let error: String?
     public let threadID: String?
     public let pendingApprovalID: UUID?
+    public let pendingApproval: Approval?
     public let createdAt: Date
     public let startedAt: Date?
     public let completedAt: Date?
 
-    public init(_ job: RemoteClaudeJob, pendingApprovalID: UUID? = nil) {
+    public init(_ job: RemoteClaudeJob, pendingApproval: Approval? = nil) {
         id = job.id
         agent = job.agent
         prompt = job.prompt
@@ -43,7 +44,8 @@ public struct RemoteBridgeJobResponse: Content, Sendable {
         response = job.response
         error = job.errorMessage
         threadID = job.sessionID
-        self.pendingApprovalID = pendingApprovalID
+        pendingApprovalID = pendingApproval?.id
+        self.pendingApproval = pendingApproval
         createdAt = job.createdAt
         startedAt = job.startedAt
         completedAt = job.completedAt
@@ -53,9 +55,18 @@ public struct RemoteBridgeJobResponse: Content, Sendable {
         case id, agent, prompt, project, status, response, error
         case threadID = "thread_id"
         case pendingApprovalID = "pending_approval_id"
+        case pendingApproval = "pending_approval"
         case createdAt = "created_at"
         case startedAt = "started_at"
         case completedAt = "completed_at"
+    }
+}
+
+public struct RemoteBridgeApprovalRequest: Content, Sendable {
+    public let answers: [ApprovalAnswer]
+
+    public init(answers: [ApprovalAnswer]) {
+        self.answers = answers
     }
 }
 
@@ -116,9 +127,9 @@ public func configureRemoteBridgeHTTPRoutes(
     }
 
     @Sendable func response(for job: RemoteClaudeJob) async throws -> RemoteBridgeJobResponse {
-        let pendingApprovalID = try await approvalService.pendingApprovals()
-            .first { $0.source?.taskID == job.id }?.id
-        return RemoteBridgeJobResponse(job, pendingApprovalID: pendingApprovalID)
+        let approval = try await approvalService.pendingApprovals()
+            .first { $0.source?.taskID == job.id }
+        return RemoteBridgeJobResponse(job, pendingApproval: approval)
     }
 
     @Sendable func resolveProject(_ rawProject: String?, agent: String) async throws -> String? {
@@ -238,6 +249,41 @@ public func configureRemoteBridgeHTTPRoutes(
             throw Abort(.conflict, reason: error.localizedDescription)
         } catch {
             throw Abort(.internalServerError, reason: "Unable to cancel bridge job.")
+        }
+    }
+
+    app.post("v1", "approvals", ":approvalID", "respond") { request async throws -> RemoteBridgeJobResponse in
+        try requireBridgeAuthorization(request)
+        guard let rawID = request.parameters.get("approvalID"), let approvalID = UUID(uuidString: rawID) else {
+            throw Abort(.badRequest, reason: "Invalid approval ID.")
+        }
+        let body = try request.content.decode(RemoteBridgeApprovalRequest.self)
+        guard !body.answers.isEmpty else {
+            throw Abort(.badRequest, reason: "At least one approval answer is required.")
+        }
+        guard let approval = try await approvalService.approval(id: approvalID),
+              let taskID = approval.source?.taskID else {
+            throw Abort(.notFound, reason: "Approval was not found or is not linked to a bridge job.")
+        }
+        do {
+            // A single-select answer from a lightweight client may omit
+            // optional text questions. Fill those with an empty response so
+            // the bridge keeps the same contract as the web approval form.
+            var answers = body.answers
+            let answeredIDs = Set(answers.map(\.id))
+            if approval.questions.count > 1 {
+                for question in approval.questions where
+                    question.kind == .text && !answeredIDs.contains(question.id) {
+                    answers.append(ApprovalAnswer(id: question.id, responses: []))
+                }
+            }
+            _ = try await approvalService.respond(id: approvalID, answers: answers)
+            guard let job = try await claudeService.job(id: taskID) else {
+                throw Abort(.notFound, reason: "Bridge job was not found.")
+            }
+            return try await response(for: job)
+        } catch let error as ApprovalError {
+            throw Abort(.conflict, reason: error.localizedDescription)
         }
     }
 }

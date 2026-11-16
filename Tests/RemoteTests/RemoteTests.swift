@@ -935,6 +935,38 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(accepted.agent, "codex")
         XCTAssertEqual(accepted.project, project)
 
+        let approval = try await fixture.service.create(
+            questions: [ApprovalQuestion(id: "answer", question: "Allow?", kind: .singleSelect, options: ["Yes", "No"])],
+            source: RemoteRequestSource(agent: "codex", project: project, taskID: accepted.id)
+        )
+        let pendingResponse = try await app.sendRequest(.GET, "/v1/jobs/\(accepted.id)", headers: headers)
+        let pending = try pendingResponse.content.decode(RemoteBridgeJobResponse.self)
+        XCTAssertEqual(pending.pendingApproval?.id, approval.id)
+        let approvalResponse = try await app.sendRequest(
+            .POST,
+            "/v1/approvals/\(approval.id.uuidString)/respond",
+            headers: headers,
+            body: byteBuffer(#"{"answers":[{"id":"answer","responses":["Yes"]}]}"#)
+        )
+        XCTAssertEqual(approvalResponse.status, .ok)
+        XCTAssertNil(try approvalResponse.content.decode(RemoteBridgeJobResponse.self).pendingApproval)
+
+        let approvalWithOptionalComment = try await fixture.service.create(
+            questions: [
+                ApprovalQuestion(id: "choice", question: "Allow?", kind: .singleSelect, options: ["Yes", "No"]),
+                ApprovalQuestion(id: "comment", question: "Comment", kind: .text)
+            ],
+            source: RemoteRequestSource(agent: "codex", project: project, taskID: accepted.id)
+        )
+        let partialApprovalResponse = try await app.sendRequest(
+            .POST,
+            "/v1/approvals/\(approvalWithOptionalComment.id.uuidString)/respond",
+            headers: headers,
+            body: byteBuffer(#"{"answers":[{"id":"choice","responses":["Yes"]}]}"#)
+        )
+        XCTAssertEqual(partialApprovalResponse.status, .ok)
+        XCTAssertNil(try partialApprovalResponse.content.decode(RemoteBridgeJobResponse.self).pendingApproval)
+
         let retried = try await app.sendRequest(
             .POST,
             "/v1/jobs",
