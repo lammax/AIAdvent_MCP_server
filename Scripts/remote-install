@@ -15,7 +15,13 @@ import urllib.request
 import uuid
 
 
-ROOT = Path.home() / "Library/Application Support/Remote"
+ROOT = Path(os.environ.get(
+    "REMOTE_INSTALL_ROOT",
+    str(Path.home() / "Library/Application Support/Remote")
+)).expanduser()
+SIGNING_IDENTITY_ROOT = Path(os.environ.get("REMOTE_SIGNING_IDENTITY_ROOT", str(ROOT))).expanduser()
+HTTP_PORT = int(os.environ.get("REMOTE_INSTALL_HTTP_PORT", "3010"))
+LAUNCH_AGENT = os.environ.get("REMOTE_INSTALL_LAUNCH_AGENT", "com.lammax.remote")
 IDENTIFIERS = {"RemoteHTTPServer": "com.lammax.remote.http", "RemoteMCPServer": "com.lammax.remote.mcp"}
 UPDATE_STATUS = ROOT / "release-update.json"
 UPDATE_LOG = Path.home() / "Library/Logs/Remote/release-update.log"
@@ -204,7 +210,7 @@ def main():
     if args.deferred or args.wait_for_idle:
         raise RuntimeError("Deferred mode installs both products; use product 'all'.")
     source = args.binary.resolve(strict=True)
-    identity = (ROOT / "signing-identity").read_text().strip()
+    identity = (SIGNING_IDENTITY_ROOT / "signing-identity").read_text().strip()
     if not re.fullmatch(r"[0-9A-Fa-f]{40}", identity):
         raise RuntimeError("signing-identity must contain the selected certificate's SHA-1 fingerprint.")
     destination = ROOT / "bin" / args.product
@@ -252,12 +258,12 @@ def main():
         run("/usr/bin/codesign", "--verify", "--strict", str(destination))
         print("Installed signed binary. Backup:", backup)
         if args.product == "RemoteHTTPServer":
-            run("/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.lammax.remote")
+            run("/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCH_AGENT}")
             # Ignore shell proxy settings when checking the loopback backend.
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             for _ in range(30):
                 try:
-                    with opener.open("http://127.0.0.1:3010/health", timeout=2) as response:
+                    with opener.open(f"http://127.0.0.1:{HTTP_PORT}/health", timeout=2) as response:
                         if response.status == 200:
                             print("Remote HTTP is healthy. Approve Documents access on the Mac if prompted.")
                             return
