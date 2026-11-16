@@ -21,6 +21,7 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
     public let createdAt: Date
     public let startedAt: Date?
     public let completedAt: Date?
+    public let idempotencyKey: String?
 
     public init(
         id: UUID,
@@ -34,7 +35,8 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         createdAt: Date,
         startedAt: Date? = nil,
         completedAt: Date? = nil,
-        agent: String = "claude"
+        agent: String = "claude",
+        idempotencyKey: String? = nil
     ) {
         self.id = id
         self.prompt = prompt
@@ -48,6 +50,7 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         self.startedAt = startedAt
         self.completedAt = completedAt
         self.agent = agent
+        self.idempotencyKey = idempotencyKey
     }
 }
 

@@ -25,12 +25,17 @@ public actor RemoteClaudeJobService {
         startWorkerIfNeeded()
     }
 
-    public func submit(prompt: String, now: Date = Date(), agent: String = "claude", project: String? = nil, fromWeb: Bool = false, sessionID: String? = nil) async throws -> RemoteClaudeJob {
+    public func submit(prompt: String, now: Date = Date(), agent: String = "claude", project: String? = nil, fromWeb: Bool = false, sessionID: String? = nil, idempotencyKey: String? = nil) async throws -> RemoteClaudeJob {
         let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedPrompt.isEmpty else { throw RemoteClaudeJobError.emptyPrompt }
         guard normalizedPrompt.count <= Self.maximumPromptLength else {
             throw RemoteClaudeJobError.promptTooLong
         }
+		let normalizedIdempotencyKey = idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+		if let normalizedIdempotencyKey, !normalizedIdempotencyKey.isEmpty,
+		   let existing = try await repository.claudeJob(agent: agent, idempotencyKey: normalizedIdempotencyKey) {
+			return existing
+		}
 
         let job = RemoteClaudeJob(
             id: UUID(),
@@ -39,7 +44,8 @@ public actor RemoteClaudeJobService {
             status: .queued,
             sessionID: sessionID,
             createdAt: now,
-            agent: agent
+            agent: agent,
+			idempotencyKey: normalizedIdempotencyKey?.isEmpty == false ? normalizedIdempotencyKey : nil
         )
         if fromWeb {
             try await repository.createWebJob(job, remoteEnabled: RemoteModePolicy.enabled(channel: .web, prompt: normalizedPrompt))

@@ -208,6 +208,17 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         try await insertClaudeJob(job, ifAbsent: false, remoteEnabled: remoteEnabled)
     }
 
+    public func claudeJob(agent: String, idempotencyKey: String) async throws -> RemoteClaudeJob? {
+        try await dbQueue.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM remote_claude_jobs WHERE agent = ? AND idempotency_key = ?",
+                arguments: [agent, idempotencyKey]
+            ) else { return nil }
+            return try Self.decodeClaudeJob(row)
+        }
+    }
+
     /// A cached usage snapshot has one UUID, including simultaneous/retried HTTP requests.
     public func saveUsageJobIfAbsent(_ job: RemoteClaudeJob) async throws -> RemoteClaudeJob {
         try await insertClaudeJob(job, ifAbsent: true)
@@ -225,8 +236,8 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 sql: """
                 INSERT INTO remote_claude_jobs (
                     id, prompt, working_directory, status, response, error_message, session_id,
-                    created_at, started_at, completed_at, agent
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, started_at, completed_at, agent, idempotency_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 \(ifAbsent ? "ON CONFLICT(id) DO UPDATE SET history_hidden_at = NULL" : "")
                 """,
                 arguments: [
@@ -241,6 +252,7 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     job.startedAt?.timeIntervalSince1970,
                     job.completedAt?.timeIntervalSince1970,
                     job.agent,
+                    job.idempotencyKey,
                 ]
             )
         }
@@ -1059,6 +1071,17 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 table.add(column: "history_hidden_at", .double)
             }
         }
+        migrator.registerMigration("addRemoteJobIdempotencyKey") { db in
+            try db.alter(table: "remote_claude_jobs") { table in
+                table.add(column: "idempotency_key", .text)
+            }
+            try db.create(
+                index: "idx_remote_claude_jobs_idempotency",
+                on: "remote_claude_jobs",
+                columns: ["agent", "idempotency_key"],
+                options: .ifNotExists
+            )
+        }
         return migrator
     }
 
@@ -1175,7 +1198,8 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             createdAt: Date(timeIntervalSince1970: row["created_at"]),
             startedAt: startedAt.map(Date.init(timeIntervalSince1970:)),
             completedAt: completedAt.map(Date.init(timeIntervalSince1970:)),
-            agent: row["agent"]
+            agent: row["agent"],
+            idempotencyKey: row["idempotency_key"]
         )
     }
 

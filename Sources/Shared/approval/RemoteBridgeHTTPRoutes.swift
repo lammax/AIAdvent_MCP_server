@@ -140,13 +140,15 @@ public func configureRemoteBridgeHTTPRoutes(
         }
         let project = try await resolveProject(body.project, agent: body.agent)
         let threadID = try await resolveThread(body.threadID, agent: body.agent, project: project)
+		let idempotencyKey = request.headers.first(name: "Idempotency-Key")?.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let job = try await claudeService.submit(
                 prompt: body.prompt,
                 agent: body.agent,
                 project: project,
                 fromWeb: true,
-                sessionID: threadID
+                sessionID: threadID,
+				idempotencyKey: idempotencyKey
             )
             return try await response(for: job)
         } catch let error as RemoteClaudeJobError {

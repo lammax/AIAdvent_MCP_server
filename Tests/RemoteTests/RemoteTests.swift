@@ -890,6 +890,7 @@ final class RemoteTests: XCTestCase {
         var headers = HTTPHeaders()
         headers.bearerAuthorization = .init(token: bridgeToken)
         headers.contentType = .json
+        headers.replaceOrAdd(name: "Idempotency-Key", value: "max-message-1")
         let health = try await app.sendRequest(.GET, "/v1/health", headers: headers)
         XCTAssertEqual(health.status, .ok)
         XCTAssertEqual(try health.content.decode(RemoteBridgeHealthResponse.self).bridge, "remote-agent")
@@ -904,6 +905,17 @@ final class RemoteTests: XCTestCase {
         let accepted = try submitted.content.decode(RemoteBridgeJobResponse.self)
         XCTAssertEqual(accepted.agent, "codex")
         XCTAssertEqual(accepted.project, project)
+
+        let retried = try await app.sendRequest(
+            .POST,
+            "/v1/jobs",
+            headers: headers,
+            body: byteBuffer("{\"agent\":\"codex\",\"prompt\":\"Bridge test\",\"project\":\"\(project)\"}")
+        )
+        XCTAssertEqual(retried.status, .ok)
+        XCTAssertEqual(try retried.content.decode(RemoteBridgeJobResponse.self).id, accepted.id)
+        let persistedJobs = try await fixture.repository.recentClaudeJobs(limit: 10)
+        XCTAssertEqual(persistedJobs.count, 1)
 
         var completed: RemoteBridgeJobResponse?
         for _ in 0..<100 {

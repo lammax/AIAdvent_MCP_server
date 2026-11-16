@@ -236,10 +236,12 @@ POST /v1/jobs/{id}/cancel
 Every request requires `Authorization: Bearer <bridge-token>`. A job request uses
 `agent`, `prompt`, optional registered `project`, and optional `thread_id`. Codex
 requires a registered project. A supplied `thread_id` is validated against the
-selected project before the task is queued. The bridge token is separate from the
-PWA login token and must never be sent to MAX or included in logs. If `REMOTE_HOST`
-is a Tailscale address, the bridge is disabled rather than being exposed through
-that interface.
+selected project before the task is queued. EnergyBot may send an
+`Idempotency-Key`; Remote persists it in SQLite and returns the original job on a
+retry instead of starting a second worker task. The bridge token is separate from
+the PWA login token and must never be sent to MAX or included in logs. If
+`REMOTE_HOST` is a Tailscale address, the bridge is disabled rather than being
+exposed through that interface.
 
 ### Continue a project chat from Remote
 
