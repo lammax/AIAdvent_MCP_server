@@ -245,7 +245,7 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
         let prompt = Self.codexPrompt(job: job, directory: directory)
         if let retiredSessionID = job.sessionID,
            let selectedConversation,
-           selectedConversation.historyBytes.map({ $0 > Self.codexRotationThresholdBytes }) == true {
+           (job.forceRotation || (job.automaticRotation && selectedConversation.historyBytes.map({ $0 > Self.codexRotationThresholdBytes }) == true)) {
             guard let repository else { throw RemoteConversationError.unavailable }
             let summary = try await RemoteCodexQueueRunner(
                 codexPath: codexPath,
@@ -257,10 +257,13 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
                 directory: directory,
                 prompt: Self.rotationSummaryPrompt(jobID: job.id, directory: directory)
             ).response
+            let rotatedPrompt = job.rotationOnly
+                ? Self.rotationOnlyCodexPrompt(job: job, directory: directory, summary: summary)
+                : Self.rotatedCodexPrompt(job: job, directory: directory, summary: summary)
             return try await runCodexThread(
                 job: job,
                 directory: directory,
-                prompt: Self.rotatedCodexPrompt(job: job, directory: directory, summary: summary),
+                prompt: rotatedPrompt,
                 retiredSessionID: retiredSessionID
             )
         }
@@ -454,6 +457,23 @@ public struct RemoteAgentRunner: RemoteClaudeJobRunning, Sendable {
             completedAt: job.completedAt,
             agent: job.agent
         ), directory: directory))
+        """
+    }
+
+    static func rotationOnlyCodexPrompt(job: RemoteClaudeJob, directory: String, summary: String) -> String {
+        let context = String(summary.prefix(50_000))
+        return """
+        This is a clean Codex chat created by an explicit Remote /newchat command.
+        Preserve the following handoff as the working context for future requests.
+        Do not modify files, run commands, ask questions, or perform any user task now.
+        Return exactly ROTATION_COMPLETE after loading the handoff.
+
+        HANDOFF SUMMARY
+        \(context)
+        END HANDOFF SUMMARY
+
+        Remote task ID: \(job.id.uuidString)
+        Target project: \(directory)
         """
     }
 

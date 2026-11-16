@@ -6,17 +6,26 @@ public struct RemoteBridgeSubmitRequest: Content, Sendable {
     public let prompt: String
     public let project: String?
     public let threadID: String?
+    public let forceRotation: Bool?
+    public let automaticRotation: Bool?
+    public let rotationOnly: Bool?
 
-    public init(agent: String = "codex", prompt: String, project: String? = nil, threadID: String? = nil) {
+    public init(agent: String = "codex", prompt: String, project: String? = nil, threadID: String? = nil, forceRotation: Bool? = nil, automaticRotation: Bool? = nil, rotationOnly: Bool? = nil) {
         self.agent = agent
         self.prompt = prompt
         self.project = project
         self.threadID = threadID
+        self.forceRotation = forceRotation
+        self.automaticRotation = automaticRotation
+        self.rotationOnly = rotationOnly
     }
 
     enum CodingKeys: String, CodingKey {
         case agent, prompt, project
         case threadID = "thread_id"
+        case forceRotation = "force_rotation"
+        case automaticRotation = "automatic_rotation"
+        case rotationOnly = "rotation_only"
     }
 }
 
@@ -87,6 +96,32 @@ public struct RemoteBridgeProjectResponse: Content, Sendable {
     public init(_ project: RemoteProject) {
         name = project.name
         path = project.path
+    }
+}
+
+public struct RemoteBridgeConversationResponse: Content, Sendable {
+    public let id: String
+    public let title: String
+    public let project: String
+    public let updatedAt: Double
+    public let busy: Bool
+    public let open: Bool?
+    public let historyBytes: Int64?
+
+    public init(_ conversation: RemoteConversation) {
+        id = conversation.id
+        title = conversation.title
+        project = conversation.project
+        updatedAt = conversation.updatedAt
+        busy = conversation.busy
+        open = conversation.open
+        historyBytes = conversation.historyBytes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, project, busy, open
+        case updatedAt = "updated_at"
+        case historyBytes = "history_bytes"
     }
 }
 
@@ -185,6 +220,34 @@ public func configureRemoteBridgeHTTPRoutes(
         }
     }
 
+    app.get("v1", "conversations") { request async throws -> [RemoteBridgeConversationResponse] in
+        try requireBridgeAuthorization(request)
+        let agent = request.query[String.self, at: "agent"] ?? "codex"
+        guard ["codex", "claude"].contains(agent) else {
+            throw Abort(.badRequest, reason: "agent must be codex or claude.")
+        }
+        guard let rawProject = request.query[String.self, at: "project"], !rawProject.isEmpty else {
+            throw Abort(.badRequest, reason: "A registered project is required.")
+        }
+        guard let conversations else {
+            throw Abort(.serviceUnavailable, reason: "Conversation catalog is not configured.")
+        }
+        do {
+            let project = try await resolveProject(rawProject, agent: agent)
+            guard let project else {
+                throw Abort(.badRequest, reason: "A registered project is required.")
+            }
+            return try await conversations.list(agent: agent, project: project).map(RemoteBridgeConversationResponse.init)
+        } catch let error as RemoteConversationError {
+            switch error {
+            case .unavailable:
+                throw Abort(.serviceUnavailable, reason: error.localizedDescription)
+            case .missing, .busy:
+                throw Abort(.conflict, reason: error.localizedDescription)
+            }
+        }
+    }
+
     app.get("v1", "usage") { request async throws -> RemoteBridgeUsageResponse in
         try requireBridgeAuthorization(request)
         let agent = request.query[String.self, at: "agent"] ?? "codex"
@@ -204,6 +267,12 @@ public func configureRemoteBridgeHTTPRoutes(
         guard ["codex", "claude"].contains(body.agent) else {
             throw Abort(.badRequest, reason: "agent must be codex or claude.")
         }
+        if body.forceRotation == true || body.rotationOnly == true, body.agent != "codex" {
+            throw Abort(.badRequest, reason: "Chat rotation is supported only for codex.")
+        }
+        if body.rotationOnly == true, body.forceRotation != true {
+            throw Abort(.badRequest, reason: "rotation_only requires force_rotation.")
+        }
         let project = try await resolveProject(body.project, agent: body.agent)
         let threadID = try await resolveThread(body.threadID, agent: body.agent, project: project)
 		let idempotencyKey = request.headers.first(name: "Idempotency-Key")?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -214,7 +283,10 @@ public func configureRemoteBridgeHTTPRoutes(
                 project: project,
                 fromWeb: true,
                 sessionID: threadID,
-				idempotencyKey: idempotencyKey
+				idempotencyKey: idempotencyKey,
+                forceRotation: body.forceRotation ?? false,
+                automaticRotation: body.automaticRotation ?? true,
+                rotationOnly: body.rotationOnly ?? false
             )
             return try await response(for: job)
         } catch let error as RemoteClaudeJobError {

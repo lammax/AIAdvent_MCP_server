@@ -892,6 +892,18 @@ final class RemoteTests: XCTestCase {
         let app = try await Application.make(.testing)
         defer { Task { try? await app.asyncShutdown() } }
         let bridgeToken = "bridge-token-that-is-at-least-32-characters"
+        let latestConversation = RemoteConversation(
+            id: UUID().uuidString,
+            title: "Latest chat",
+            project: project,
+            updatedAt: 20,
+            busy: false
+        )
+        let conversations = RemoteConversationCatalog(
+            reader: TestConversationReader(rows: [latestConversation]),
+            repository: fixture.repository,
+            projects: [RemoteProject(name: "Test", path: project)]
+        )
         configureRemoteBridgeHTTPRoutes(
             app: app,
             claudeService: jobs,
@@ -899,7 +911,7 @@ final class RemoteTests: XCTestCase {
             authorization: ApprovalHTTPAuthorization(token: bridgeToken),
             projects: [RemoteProject(name: "Test", path: project)],
             projectRegistry: nil,
-            conversations: nil,
+            conversations: conversations,
             usage: RemoteUsageService(reader: BridgeUsageReader())
         )
 
@@ -918,6 +930,15 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(projectList.status, .ok)
         let projects = try projectList.content.decode([RemoteBridgeProjectResponse].self)
         XCTAssertEqual(projects.map(\.path), [project])
+
+        let conversationList = try await app.sendRequest(
+            .GET,
+            "/v1/conversations?agent=codex&project=\(project)",
+            headers: headers
+        )
+        XCTAssertEqual(conversationList.status, .ok)
+        let listedConversations = try conversationList.content.decode([RemoteBridgeConversationResponse].self)
+        XCTAssertEqual(listedConversations.map(\.id), [latestConversation.id])
 
         let usage = try await app.sendRequest(.GET, "/v1/usage?agent=codex", headers: headers)
         XCTAssertEqual(usage.status, .ok)

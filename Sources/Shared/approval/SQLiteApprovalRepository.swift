@@ -236,8 +236,9 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 sql: """
                 INSERT INTO remote_claude_jobs (
                     id, prompt, working_directory, status, response, error_message, session_id,
-                    created_at, started_at, completed_at, agent, idempotency_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, started_at, completed_at, agent, idempotency_key,
+                    force_rotation, automatic_rotation, rotation_only
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 \(ifAbsent ? "ON CONFLICT(id) DO UPDATE SET history_hidden_at = NULL" : "")
                 """,
                 arguments: [
@@ -253,6 +254,9 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                     job.completedAt?.timeIntervalSince1970,
                     job.agent,
                     job.idempotencyKey,
+                    job.forceRotation,
+                    job.automaticRotation,
+                    job.rotationOnly,
                 ]
             )
         }
@@ -1082,6 +1086,13 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
                 options: .ifNotExists
             )
         }
+        migrator.registerMigration("addRemoteChatRotationControls") { db in
+            try db.alter(table: "remote_claude_jobs") { table in
+                table.add(column: "force_rotation", .boolean).notNull().defaults(to: false)
+                table.add(column: "automatic_rotation", .boolean).notNull().defaults(to: true)
+                table.add(column: "rotation_only", .boolean).notNull().defaults(to: false)
+            }
+        }
         return migrator
     }
 
@@ -1186,6 +1197,9 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
         let startedAt: Double? = row["started_at"]
         let completedAt: Double? = row["completed_at"]
         let messageQueuedAt: Double? = row["message_queued_at"]
+        let forceRotation: Bool = row["force_rotation"]
+        let automaticRotation: Bool = row["automatic_rotation"]
+        let rotationOnly: Bool = row["rotation_only"]
         return RemoteClaudeJob(
             id: id,
             prompt: row["prompt"],
@@ -1199,7 +1213,10 @@ public actor SQLiteApprovalRepository: ApprovalRepository, RemoteClaudeJobReposi
             startedAt: startedAt.map(Date.init(timeIntervalSince1970:)),
             completedAt: completedAt.map(Date.init(timeIntervalSince1970:)),
             agent: row["agent"],
-            idempotencyKey: row["idempotency_key"]
+            idempotencyKey: row["idempotency_key"],
+            forceRotation: forceRotation,
+            automaticRotation: automaticRotation,
+            rotationOnly: rotationOnly
         )
     }
 

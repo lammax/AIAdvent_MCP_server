@@ -22,6 +22,9 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
     public let startedAt: Date?
     public let completedAt: Date?
     public let idempotencyKey: String?
+    public let forceRotation: Bool
+    public let automaticRotation: Bool
+    public let rotationOnly: Bool
 
     public init(
         id: UUID,
@@ -36,7 +39,10 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         startedAt: Date? = nil,
         completedAt: Date? = nil,
         agent: String = "claude",
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        forceRotation: Bool = false,
+        automaticRotation: Bool = true,
+        rotationOnly: Bool = false
     ) {
         self.id = id
         self.prompt = prompt
@@ -51,6 +57,9 @@ public struct RemoteClaudeJob: Codable, Sendable, Equatable {
         self.completedAt = completedAt
         self.agent = agent
         self.idempotencyKey = idempotencyKey
+        self.forceRotation = forceRotation
+        self.automaticRotation = automaticRotation
+        self.rotationOnly = rotationOnly
     }
 }
 
