@@ -60,6 +60,7 @@ public struct RemoteHTTPConfiguration: Sendable {
     public let port: Int
     public let publicOrigin: URL
     public let token: String
+    public let bridgeToken: String?
     public let databasePath: String
     public let timeout: TimeInterval
     public let resumableTimeout: TimeInterval
@@ -70,6 +71,10 @@ public struct RemoteHTTPConfiguration: Sendable {
 
     public var usesSecureCookies: Bool {
         publicOrigin.scheme?.lowercased() == "https"
+    }
+
+    public var isLoopbackHost: Bool {
+        host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 
     public static func load(
@@ -103,6 +108,12 @@ public struct RemoteHTTPConfiguration: Sendable {
         guard token.count >= 32 else {
             throw RemoteConfigurationError.missingOrWeakToken
         }
+
+        let bridgeToken = try optionalToken(
+            inlineKey: "REMOTE_BRIDGE_TOKEN",
+            fileKey: "REMOTE_BRIDGE_TOKEN_FILE",
+            environment: environment
+        )
 
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claudeExecutablePath = NSString(
@@ -150,6 +161,7 @@ public struct RemoteHTTPConfiguration: Sendable {
             port: port,
             publicOrigin: publicOrigin,
             token: token,
+            bridgeToken: bridgeToken,
             databasePath: service.databasePath,
             timeout: service.timeout,
             resumableTimeout: service.resumableTimeout,
@@ -176,6 +188,30 @@ public struct RemoteHTTPConfiguration: Sendable {
             throw RemoteConfigurationError.invalidValue(name)
         }
         return value
+    }
+
+    private static func optionalToken(
+        inlineKey: String,
+        fileKey: String,
+        environment: [String: String]
+    ) throws -> String? {
+        let token: String
+        if let inline = environment[inlineKey], !inline.isEmpty {
+            token = inline
+        } else if let path = environment[fileKey], !path.isEmpty {
+            do {
+                token = try String(contentsOfFile: NSString(string: path).expandingTildeInPath, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                throw RemoteConfigurationError.invalidValue(fileKey)
+            }
+        } else {
+            return nil
+        }
+        guard token.count >= 32 else {
+            throw RemoteConfigurationError.invalidValue(inlineKey)
+        }
+        return token
     }
 
     private static func isAllowedHost(_ host: String) -> Bool {

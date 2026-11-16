@@ -194,6 +194,8 @@ updates; certificate replacement or expiration requires a separate planned check
 | `REMOTE_PUBLIC_ORIGIN` | derived from host and port | External origin used for Secure cookies and Origin validation. |
 | `REMOTE_TOKEN` | none | Inline access token of at least 32 characters. |
 | `REMOTE_TOKEN_FILE` | none | Preferred path to a file containing the access token. |
+| `REMOTE_BRIDGE_TOKEN` | none | Dedicated bearer token for trusted local EnergyBot clients. At least 32 characters. |
+| `REMOTE_BRIDGE_TOKEN_FILE` | none | Preferred path to the dedicated bridge token. The bridge is disabled when neither bridge variable is set. |
 | `REMOTE_VAPID_FILE` | `~/Library/Application Support/Remote/vapid.json` | Stable VAPID configuration with mode `600`. Never regenerate it during startup or upgrades. |
 | `REMOTE_DB_PATH` | `~/Library/Application Support/Remote/approval.sqlite` | SQLite database path. |
 | `REMOTE_TIMEOUT_SECONDS` | `300` | Lifetime of an ordinary approval without `task_id`, from 1 to 3,600 seconds. |
@@ -212,6 +214,32 @@ REMOTE_TOKEN_FILE="$token_file" swift run RemoteHTTPServer
 ```
 
 Do not place the token in this repository, command history, URLs, logs, or screenshots.
+
+### Local Remote Agent Bridge
+
+When `REMOTE_BRIDGE_TOKEN` or `REMOTE_BRIDGE_TOKEN_FILE` is configured and
+`REMOTE_HOST` is loopback, `RemoteHTTPServer` enables a machine-facing API on the
+same loopback listener.
+It reuses the existing `RemoteClaudeJobService`, SQLite queue, approvals, project
+allowlist, Codex/Claude runners, and cancellation behavior; it does not start a
+second worker or expose a second port.
+
+The API is intended for the local EnergyBot process:
+
+```text
+GET  /v1/health
+POST /v1/jobs
+GET  /v1/jobs/{id}
+POST /v1/jobs/{id}/cancel
+```
+
+Every request requires `Authorization: Bearer <bridge-token>`. A job request uses
+`agent`, `prompt`, optional registered `project`, and optional `thread_id`. Codex
+requires a registered project. A supplied `thread_id` is validated against the
+selected project before the task is queued. The bridge token is separate from the
+PWA login token and must never be sent to MAX or included in logs. If `REMOTE_HOST`
+is a Tailscale address, the bridge is disabled rather than being exposed through
+that interface.
 
 ### Continue a project chat from Remote
 

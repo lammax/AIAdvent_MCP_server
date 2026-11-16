@@ -861,6 +861,63 @@ final class RemoteTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("escape").path))
     }
 
+    func testRemoteBridgeUsesDedicatedBearerTokenAndSharedJobWorker() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let project = fixture.directory.resolvingSymlinksInPath().path
+        let jobs = RemoteClaudeJobService(
+            repository: fixture.repository,
+            runner: StubClaudeRunner(),
+            workingDirectory: project
+        )
+        try await jobs.start()
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let bridgeToken = "bridge-token-that-is-at-least-32-characters"
+        configureRemoteBridgeHTTPRoutes(
+            app: app,
+            claudeService: jobs,
+            approvalService: fixture.service,
+            authorization: ApprovalHTTPAuthorization(token: bridgeToken),
+            projects: [RemoteProject(name: "Test", path: project)],
+            projectRegistry: nil,
+            conversations: nil
+        )
+
+        let unauthorized = try await app.sendRequest(.GET, "/v1/health")
+        XCTAssertEqual(unauthorized.status, .unauthorized)
+
+        var headers = HTTPHeaders()
+        headers.bearerAuthorization = .init(token: bridgeToken)
+        headers.contentType = .json
+        let health = try await app.sendRequest(.GET, "/v1/health", headers: headers)
+        XCTAssertEqual(health.status, .ok)
+        XCTAssertEqual(try health.content.decode(RemoteBridgeHealthResponse.self).bridge, "remote-agent")
+
+        let submitted = try await app.sendRequest(
+            .POST,
+            "/v1/jobs",
+            headers: headers,
+            body: byteBuffer("{\"agent\":\"codex\",\"prompt\":\"Bridge test\",\"project\":\"\(project)\"}")
+        )
+        XCTAssertEqual(submitted.status, .ok)
+        let accepted = try submitted.content.decode(RemoteBridgeJobResponse.self)
+        XCTAssertEqual(accepted.agent, "codex")
+        XCTAssertEqual(accepted.project, project)
+
+        var completed: RemoteBridgeJobResponse?
+        for _ in 0..<100 {
+            let response = try await app.sendRequest(.GET, "/v1/jobs/\(accepted.id)", headers: headers)
+            let current = try response.content.decode(RemoteBridgeJobResponse.self)
+            if current.status == .completed {
+                completed = current
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(completed?.response, "Done: Bridge test")
+    }
+
     func testCodexHTTPEnablesModeOnlyAfterValidAuthenticatedMessage() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }

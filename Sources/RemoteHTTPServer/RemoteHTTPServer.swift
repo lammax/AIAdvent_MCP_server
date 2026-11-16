@@ -103,6 +103,21 @@ enum RemoteHTTPServer {
             conversations: conversations
         )
 
+        if let bridgeToken = configuration.bridgeToken, configuration.isLoopbackHost {
+            configureRemoteBridgeHTTPRoutes(
+                app: app,
+                claudeService: claudeService,
+                approvalService: approvalService,
+                authorization: ApprovalHTTPAuthorization(token: bridgeToken),
+                projects: projects,
+                projectRegistry: projectRegistry,
+                conversations: conversations
+            )
+            app.logger.info("Remote Agent Bridge is enabled on the local HTTP server.")
+        } else if configuration.bridgeToken != nil {
+            app.logger.error("Remote Agent Bridge is disabled because REMOTE_HOST is not loopback.")
+        }
+
         do {
             try await app.execute()
             await pushWorker?.stop()
