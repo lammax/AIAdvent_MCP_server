@@ -897,7 +897,8 @@ final class RemoteTests: XCTestCase {
             title: "Latest chat",
             project: project,
             updatedAt: 20,
-            busy: false
+            busy: false,
+            open: true
         )
         let conversations = RemoteConversationCatalog(
             reader: TestConversationReader(rows: [latestConversation]),
@@ -930,6 +931,12 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(projectList.status, .ok)
         let projects = try projectList.content.decode([RemoteBridgeProjectResponse].self)
         XCTAssertEqual(projects.map(\.path), [project])
+
+        let claudeProjectList = try await app.sendRequest(.GET, "/v1/projects?agent=claude", headers: headers)
+        XCTAssertEqual(claudeProjectList.status, .ok)
+        let claudeProjects = try claudeProjectList.content.decode([RemoteBridgeProjectResponse].self)
+        XCTAssertEqual(claudeProjects.map(\.name), ["Latest chat"])
+        XCTAssertEqual(claudeProjects.map(\.path), [project])
 
         let conversationList = try await app.sendRequest(
             .GET,

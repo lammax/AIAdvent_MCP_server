@@ -97,6 +97,11 @@ public struct RemoteBridgeProjectResponse: Content, Sendable {
         name = project.name
         path = project.path
     }
+
+    public init(_ choice: RemoteProjectChoice) {
+        name = choice.name
+        path = choice.path
+    }
 }
 
 public struct RemoteBridgeConversationResponse: Content, Sendable {
@@ -211,6 +216,16 @@ public func configureRemoteBridgeHTTPRoutes(
         let agent = request.query[String.self, at: "agent"] ?? "codex"
         guard ["codex", "claude"].contains(agent) else {
             throw Abort(.badRequest, reason: "agent must be codex or claude.")
+        }
+        if agent == "claude", let conversations {
+            do {
+                return try await conversations.projectChoices(agent: agent).map(RemoteBridgeProjectResponse.init)
+            } catch {
+                request.logger.warning("Claude project discovery failed", metadata: [
+                    "error-type": "\(String(reflecting: type(of: error)))"
+                ])
+                throw Abort(.serviceUnavailable, reason: RemoteConversationError.unavailable.localizedDescription)
+            }
         }
         let available = await projectRegistry?.projects() ?? projects
         var seen = Set<String>()
