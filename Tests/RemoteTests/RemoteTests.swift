@@ -942,6 +942,7 @@ final class RemoteTests: XCTestCase {
         let claudeProjects = try claudeProjectList.content.decode([RemoteBridgeProjectResponse].self)
         XCTAssertEqual(claudeProjects.map(\.name), ["Latest chat"])
         XCTAssertEqual(claudeProjects.map(\.path), [project])
+        XCTAssertEqual(claudeProjects.map(\.sessionID), [latestConversation.id])
 
         let conversationList = try await app.sendRequest(
             .GET,

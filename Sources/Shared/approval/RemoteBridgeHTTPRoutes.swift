@@ -92,15 +92,23 @@ public struct RemoteBridgeHealthResponse: Content, Sendable {
 public struct RemoteBridgeProjectResponse: Content, Sendable {
     public let name: String
     public let path: String
+    public let sessionID: String?
 
     public init(_ project: RemoteProject) {
         name = project.name
         path = project.path
+        sessionID = nil
     }
 
     public init(_ choice: RemoteProjectChoice) {
         name = choice.name
         path = choice.path
+        sessionID = choice.sessionID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, path
+        case sessionID = "session_id"
     }
 }
 
