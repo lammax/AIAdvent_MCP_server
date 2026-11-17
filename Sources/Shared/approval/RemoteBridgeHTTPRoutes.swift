@@ -219,7 +219,7 @@ public func configureRemoteBridgeHTTPRoutes(
         }
         if agent == "claude", let conversations {
             do {
-                return try await conversations.projectChoices(agent: agent).map(RemoteBridgeProjectResponse.init)
+                return try await conversations.openClaudeProjectChoices().map(RemoteBridgeProjectResponse.init)
             } catch {
                 request.logger.warning("Claude project discovery failed", metadata: [
                     "error-type": "\(String(reflecting: type(of: error)))"

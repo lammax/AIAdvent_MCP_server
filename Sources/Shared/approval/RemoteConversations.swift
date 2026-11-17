@@ -84,6 +84,30 @@ public actor RemoteConversationCatalog {
             return projects.map { RemoteProjectChoice(name: $0.name, path: $0.path) }
         }
 
+        let openChoices = try await openClaudeProjectChoices(projects: projects)
+        var choices = openChoices.0
+        let representedPaths = openChoices.1
+        for project in projects {
+            let canonical = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().standardizedFileURL.path
+            guard !representedPaths.contains(canonical) else { continue }
+            choices.append(RemoteProjectChoice(name: project.name, path: canonical))
+        }
+        return choices
+    }
+
+    /// Returns only projects that currently have an open Claude chat.
+    ///
+    /// The web Remote keeps registered directories as a fallback so a user can
+    /// start a new chat. The bot needs an agent-specific list instead: showing
+    /// every registered directory makes Claude look like it is returning the
+    /// Codex project catalog.
+    public func openClaudeProjectChoices() async throws -> [RemoteProjectChoice] {
+        let projects = await projectRegistry.projects()
+        return try await openClaudeProjectChoices(projects: projects).0
+    }
+
+    private func openClaudeProjectChoices(projects: [RemoteProject]) async throws -> ([RemoteProjectChoice], Set<String>) {
+
         var pathOwners: [String: RemoteProject] = [:]
         var lookupPaths = Set<String>()
         var knownIDs = Set<String>()
@@ -96,10 +120,10 @@ public actor RemoteConversationCatalog {
                 pathOwners[resolved] = pathOwners[resolved] ?? project
                 lookupPaths.insert(resolved)
             }
-            knownIDs.formUnion(try await repository.conversationSessionIDs(agent: agent, project: canonical))
+            knownIDs.formUnion(try await repository.conversationSessionIDs(agent: "claude", project: canonical))
         }
 
-        let rows = try await reader.list(agent: agent, projects: lookupPaths.sorted(), knownRemoteIDs: knownIDs)
+        let rows = try await reader.list(agent: "claude", projects: lookupPaths.sorted(), knownRemoteIDs: knownIDs)
         var representedPaths = Set<String>()
         var choices: [RemoteProjectChoice] = []
         for row in rows.filter({ $0.open == true }).sorted(by: {
@@ -110,14 +134,7 @@ public actor RemoteConversationCatalog {
             representedPaths.insert(executionPath)
             choices.append(RemoteProjectChoice(name: row.title, path: executionPath, sessionID: row.id))
         }
-
-        for project in projects {
-            let canonical = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().standardizedFileURL.path
-            guard !representedPaths.contains(canonical) else { continue }
-            representedPaths.insert(canonical)
-            choices.append(RemoteProjectChoice(name: project.name, path: canonical))
-        }
-        return choices
+        return (choices, representedPaths)
     }
 }
 

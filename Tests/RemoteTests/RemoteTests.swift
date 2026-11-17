@@ -181,6 +181,11 @@ final class RemoteTests: XCTestCase {
             RemoteProjectChoice(name: "artesia-ios-ed", path: openPath, sessionID: openID),
             RemoteProjectChoice(name: "Other", path: otherPath)
         ])
+
+        let openOnly = try await catalog.openClaudeProjectChoices()
+        XCTAssertEqual(openOnly, [
+            RemoteProjectChoice(name: "artesia-ios-ed", path: openPath, sessionID: openID)
+        ])
     }
 
     func testClaudeOwnerMetadataOverridesStoredSessionTitle() throws {
