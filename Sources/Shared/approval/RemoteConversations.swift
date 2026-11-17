@@ -194,9 +194,14 @@ public struct RemoteCLIConversationsReader: RemoteConversationsReading {
             let cursorName = (row["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let existing = merged[id]
             let timestamp = (row["startedAt"] as? NSNumber)?.doubleValue ?? 0
+            let title = Self.meaningfulClaudeTitle(existing?.title, sessionID: id)
+                ?? Self.meaningfulClaudeTitle(cursorName, sessionID: id)
+                ?? existing?.title
+                ?? cursorName
+                ?? id
             merged[id] = RemoteConversation(
                 id: id,
-                title: cursorName.flatMap { $0.isEmpty ? nil : $0 } ?? existing?.title ?? id,
+                title: title,
                 project: project,
                 updatedAt: existing?.updatedAt ?? timestamp / 1_000,
                 busy: (row["status"] as? String)?.lowercased() == "busy",
@@ -204,6 +209,14 @@ public struct RemoteCLIConversationsReader: RemoteConversationsReading {
             )
         }
         return Array(merged.values)
+    }
+
+    private static func meaningfulClaudeTitle(_ rawTitle: String?, sessionID: String) -> String? {
+        guard let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty,
+              title != sessionID,
+              !title.hasPrefix("Remote-") else { return nil }
+        return title
     }
 
     public static func decodeCodex(_ data: Data, knownRemoteIDs: Set<String>) throws -> [RemoteConversation] {

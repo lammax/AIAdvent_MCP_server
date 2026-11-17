@@ -188,7 +188,7 @@ final class RemoteTests: XCTestCase {
         ])
     }
 
-    func testClaudeOwnerMetadataOverridesStoredSessionTitle() throws {
+    func testClaudeOwnerMetadataPrefersStoredSessionTitle() throws {
         let path = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
         let id = UUID().uuidString
         let merged = try RemoteCLIConversationsReader.mergeClaudeOwners(
@@ -196,7 +196,7 @@ final class RemoteTests: XCTestCase {
             activeRows: [["sessionId": id, "cwd": path, "name": "Cursor chat title", "startedAt": 1_000]],
             projects: [path]
         )
-        XCTAssertEqual(merged, [.init(id: id, title: "Cursor chat title", project: path, updatedAt: 42, busy: false, open: true)])
+        XCTAssertEqual(merged, [.init(id: id, title: "Generated SDK summary", project: path, updatedAt: 42, busy: false, open: true)])
 
         let busy = try RemoteCLIConversationsReader.mergeClaudeOwners(
             sessions: merged,
