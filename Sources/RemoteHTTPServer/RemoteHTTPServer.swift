@@ -105,14 +105,38 @@ enum RemoteHTTPServer {
         )
 
         if let bridgeToken = configuration.bridgeToken, configuration.isLoopbackHost {
+            let bridgeJobsPath = URL(fileURLWithPath: configuration.databasePath)
+                .deletingLastPathComponent()
+                .appendingPathComponent("agent-bridge-jobs.sqlite")
+                .path
+            let bridgeJobRepository = try SQLiteAgentBridgeJobRepository(path: bridgeJobsPath)
+            let bridgeConversations = RemoteConversationCatalog(
+                reader: RemoteCLIConversationsReader(codexPath: codexPath, claudePath: configuration.claudeExecutablePath),
+                repository: bridgeJobRepository, projectRegistry: projectRegistry
+            )
+            let bridgeJobService = AgentBridgeJobService(
+                repository: bridgeJobRepository,
+                runner: RemoteAgentRunner(
+                    claude: ClaudeCLIRunner(executablePath: configuration.claudeExecutablePath),
+                    codexPath: codexPath,
+                    mcpServerPath: configuration.mcpServerPath,
+                    mcpDatabasePath: configuration.databasePath,
+                    projects: projects,
+                    projectRegistry: projectRegistry,
+                    conversations: bridgeConversations,
+                    repository: bridgeJobRepository
+                ),
+                workingDirectory: configuration.claudeWorkingDirectory
+            )
+            try await bridgeJobService.start()
             configureRemoteBridgeHTTPRoutes(
                 app: app,
-                claudeService: claudeService,
+                claudeService: bridgeJobService,
                 approvalService: approvalService,
                 authorization: ApprovalHTTPAuthorization(token: bridgeToken),
                 projects: projects,
                 projectRegistry: projectRegistry,
-                conversations: conversations,
+                conversations: bridgeConversations,
                 usage: RemoteUsageService(reader: RemoteCLIUsageReader(
                     codexPath: codexPath, claudePath: configuration.claudeExecutablePath
                 ))

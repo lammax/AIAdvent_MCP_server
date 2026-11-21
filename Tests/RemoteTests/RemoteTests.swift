@@ -888,8 +888,11 @@ final class RemoteTests: XCTestCase {
         let fixture = try makeFixture()
         defer { fixture.remove() }
         let project = fixture.directory.resolvingSymlinksInPath().path
-        let jobs = RemoteClaudeJobService(
-            repository: fixture.repository,
+        let bridgeJobRepository = try SQLiteAgentBridgeJobRepository(
+            path: fixture.directory.appendingPathComponent("agent-bridge-jobs.sqlite").path
+        )
+        let jobs = AgentBridgeJobService(
+            repository: bridgeJobRepository,
             runner: StubClaudeRunner(),
             workingDirectory: project
         )
@@ -907,7 +910,7 @@ final class RemoteTests: XCTestCase {
         )
         let conversations = RemoteConversationCatalog(
             reader: TestConversationReader(rows: [latestConversation]),
-            repository: fixture.repository,
+            repository: bridgeJobRepository,
             projects: [RemoteProject(name: "Test", path: project)]
         )
         configureRemoteBridgeHTTPRoutes(
@@ -1009,7 +1012,7 @@ final class RemoteTests: XCTestCase {
         )
         XCTAssertEqual(retried.status, .ok)
         XCTAssertEqual(try retried.content.decode(RemoteBridgeJobResponse.self).id, accepted.id)
-        let persistedJobs = try await fixture.repository.recentClaudeJobs(limit: 10)
+        let persistedJobs = try await bridgeJobRepository.recentClaudeJobs(limit: 10)
         XCTAssertEqual(persistedJobs.count, 1)
 
         var completed: RemoteBridgeJobResponse?

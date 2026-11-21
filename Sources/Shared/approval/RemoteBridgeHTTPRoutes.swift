@@ -156,11 +156,12 @@ public struct RemoteBridgeUsageResponse: Content, Sendable {
 }
 
 /// Machine-facing bridge for trusted local clients such as EnergyBot.
-/// It deliberately shares the existing RemoteClaudeJobService worker, queue,
-/// approvals, and SQLite repository with RemoteHTTPServer.
+/// It shares approvals (ApprovalService/SQLiteApprovalRepository) with RemoteHTTPServer,
+/// but job scheduling runs through its own `AgentBridgeJobService` and its own SQLite
+/// job table, independent of the original Remote approval system's job worker/queue.
 public func configureRemoteBridgeHTTPRoutes(
     app: Application,
-    claudeService: RemoteClaudeJobService,
+    claudeService: AgentBridgeJobService,
     approvalService: ApprovalService,
     authorization: ApprovalHTTPAuthorization,
     projects: [RemoteProject],
