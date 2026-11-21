@@ -5,11 +5,21 @@ public struct RemoteUsageReport: Sendable {
     public let text: String
     /// Remaining percent of the 5-hour subscription window, when the CLI reported one.
     public let fiveHourRemainingPercent: Double?
+    /// Remaining percent of the 7-day (weekly) subscription window, when the CLI
+    /// reported one. A separate cap from the 5-hour window — either can independently
+    /// make the CLI refuse to work, so both need their own stop threshold.
+    public let weeklyRemainingPercent: Double?
     public let fetchedAt: Date
-    public init(text: String, fiveHourRemainingPercent: Double? = nil, fetchedAt: Date = Date()) {
+    public init(
+        text: String,
+        fiveHourRemainingPercent: Double? = nil,
+        weeklyRemainingPercent: Double? = nil,
+        fetchedAt: Date = Date()
+    ) {
         self.id = UUID()
         self.text = text
         self.fiveHourRemainingPercent = fiveHourRemainingPercent
+        self.weeklyRemainingPercent = weeklyRemainingPercent
         self.fetchedAt = fetchedAt
     }
 }
@@ -116,7 +126,8 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
                             let data = try JSONSerialization.data(withJSONObject: result)
                             return RemoteUsageReport(
                                 text: try Self.codexText(data),
-                                fiveHourRemainingPercent: Self.codexFiveHourRemainingPercent(data)
+                                fiveHourRemainingPercent: Self.codexFiveHourRemainingPercent(data),
+                                weeklyRemainingPercent: Self.codexWeeklyRemainingPercent(data)
                             )
                         }
                     }
@@ -127,7 +138,8 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
                   let text = String(data: buffer, encoding: .utf8) else { throw RemoteUsageError.unavailable }
             return RemoteUsageReport(
                 text: try Self.claudeText(text),
-                fiveHourRemainingPercent: Self.claudeFiveHourRemainingPercent(text)
+                fiveHourRemainingPercent: Self.claudeFiveHourRemainingPercent(text),
+                weeklyRemainingPercent: Self.claudeWeeklyRemainingPercent(text)
             )
         }.value
     }
@@ -155,9 +167,17 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
     /// Extracted independently of `claudeText` so a change to the display text can never
     /// silently change what the 10%-remaining switch-over threshold reads.
     public static func claudeFiveHourRemainingPercent(_ output: String) -> Double? {
-        guard let regex = try? NSRegularExpression(pattern: #"^Current session: ([0-9]+(?:\.[0-9]+)?)% used"#) else {
-            return nil
-        }
+        claudeWindowRemainingPercent(output, pattern: #"^Current session: ([0-9]+(?:\.[0-9]+)?)% used"#)
+    }
+
+    /// The 7-day cap — a separate limit from the 5-hour one, matching the "Current week"
+    /// line `claudeText` already renders as "7 дней".
+    public static func claudeWeeklyRemainingPercent(_ output: String) -> Double? {
+        claudeWindowRemainingPercent(output, pattern: #"^Current week[^:]*: ([0-9]+(?:\.[0-9]+)?)% used"#)
+    }
+
+    private static func claudeWindowRemainingPercent(_ output: String, pattern: String) -> Double? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         for line in output.components(separatedBy: .newlines) {
             let range = NSRange(line.startIndex..., in: line)
             guard let match = regex.firstMatch(in: line, range: range),
@@ -170,6 +190,16 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
 
     /// Extracted independently of `codexText` for the same reason as `claudeFiveHourRemainingPercent`.
     public static func codexFiveHourRemainingPercent(_ data: Data) -> Double? {
+        codexWindowRemainingPercent(data, windowDurationMins: 300)
+    }
+
+    /// The 7-day cap — a separate limit from the 5-hour one, using the same
+    /// `windowDurationMins == 10080` convention `codexText` already uses for its "7 дней" label.
+    public static func codexWeeklyRemainingPercent(_ data: Data) -> Double? {
+        codexWindowRemainingPercent(data, windowDurationMins: 10_080)
+    }
+
+    private static func codexWindowRemainingPercent(_ data: Data, windowDurationMins: Int) -> Double? {
         struct Window: Decodable { let usedPercent: Double?; let windowDurationMins: Int? }
         struct Bucket: Decodable { let primary: Window?; let secondary: Window? }
         struct Payload: Decodable { let rateLimits: Bucket?; let rateLimitsByLimitId: [String: Bucket]? }
@@ -178,7 +208,7 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
             ?? payload.rateLimits.map { ["codex": $0] } ?? [:]
         for bucket in buckets.values {
             for window in [bucket.primary, bucket.secondary].compactMap({ $0 }) {
-                guard window.windowDurationMins == 300, let used = window.usedPercent, used.isFinite else { continue }
+                guard window.windowDurationMins == windowDurationMins, let used = window.usedPercent, used.isFinite else { continue }
                 return max(0, min(100, 100 - used))
             }
         }

@@ -142,18 +142,21 @@ public struct RemoteBridgeUsageResponse: Content, Sendable {
     public let agent: String
     public let text: String
     public let fiveHourRemainingPercent: Double?
+    public let weeklyRemainingPercent: Double?
     public let fetchedAt: Date
 
     public init(agent: String, report: RemoteUsageReport) {
         self.agent = agent
         text = report.text
         fiveHourRemainingPercent = report.fiveHourRemainingPercent
+        weeklyRemainingPercent = report.weeklyRemainingPercent
         fetchedAt = report.fetchedAt
     }
 
     enum CodingKeys: String, CodingKey {
         case agent, text
         case fiveHourRemainingPercent = "five_hour_remaining_percent"
+        case weeklyRemainingPercent = "weekly_remaining_percent"
         case fetchedAt = "fetched_at"
     }
 }

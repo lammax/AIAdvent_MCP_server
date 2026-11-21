@@ -655,6 +655,16 @@ final class RemoteTests: XCTestCase {
         XCTAssertThrowsError(try RemoteCLIUsageReader.claudeText("Not logged in"))
     }
 
+    func testUsageExtractsFiveHourAndWeeklyRemainingPercentIndependently() throws {
+        let codexData = Data(#"{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300},"secondary":{"usedPercent":100,"windowDurationMins":10080}},"rateLimitsByLimitId":{}}"#.utf8)
+        XCTAssertEqual(RemoteCLIUsageReader.codexFiveHourRemainingPercent(codexData), 80)
+        XCTAssertEqual(RemoteCLIUsageReader.codexWeeklyRemainingPercent(codexData), 0)
+
+        let claudeText = "Current session: 9% used · resets Nov 2 at 1:09pm (Europe/Moscow)\nCurrent week (all models): 27% used · resets Nov 7 at 8:59am (Europe/Moscow)"
+        XCTAssertEqual(RemoteCLIUsageReader.claudeFiveHourRemainingPercent(claudeText), 91)
+        XCTAssertEqual(RemoteCLIUsageReader.claudeWeeklyRemainingPercent(claudeText), 73)
+    }
+
     func testUsageReturnsPersistedAnswerWithoutQueueOrAgentMode() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }
