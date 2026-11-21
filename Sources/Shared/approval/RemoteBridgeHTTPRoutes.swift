@@ -138,6 +138,10 @@ public struct RemoteBridgeConversationResponse: Content, Sendable {
     }
 }
 
+public struct RemoteBridgeRawHistoryResponse: Content, Sendable {
+    public let text: String
+}
+
 public struct RemoteBridgeUsageResponse: Content, Sendable {
     public let agent: String
     public let text: String
@@ -173,7 +177,8 @@ public func configureRemoteBridgeHTTPRoutes(
     projects: [RemoteProject],
     projectRegistry: RemoteProjectRegistry?,
     conversations: RemoteConversationCatalog?,
-    usage: RemoteUsageService? = nil
+    usage: RemoteUsageService? = nil,
+    codexPath: String? = nil
 ) {
     @Sendable func requireBridgeAuthorization(_ request: Request) throws {
         guard authorization.isBearerAuthorized(request) else {
@@ -275,6 +280,36 @@ public func configureRemoteBridgeHTTPRoutes(
             case .missing, .busy:
                 throw Abort(.conflict, reason: error.localizedDescription)
             }
+        }
+    }
+
+    app.get("v1", "conversations", "raw-history") { request async throws -> RemoteBridgeRawHistoryResponse in
+        try requireBridgeAuthorization(request)
+        let agent = request.query[String.self, at: "agent"] ?? "codex"
+        guard let rawProject = request.query[String.self, at: "project"], !rawProject.isEmpty else {
+            throw Abort(.badRequest, reason: "A registered project is required.")
+        }
+        guard let rawThreadID = request.query[String.self, at: "thread_id"], !rawThreadID.isEmpty else {
+            throw Abort(.badRequest, reason: "thread_id is required.")
+        }
+        guard agent == "codex" else {
+            throw Abort(.notImplemented, reason: "Raw history export is only implemented for Codex.")
+        }
+        guard let codexPath else {
+            throw Abort(.serviceUnavailable, reason: "Codex path is not configured.")
+        }
+        let project = try await resolveProject(rawProject, agent: agent)
+        guard let project else {
+            throw Abort(.badRequest, reason: "A registered project is required.")
+        }
+        do {
+            // Foundation's synchronous pipe reads must not block Vapor's event loop.
+            let text = try await Task.detached(priority: .utility) {
+                try CodexRawHistoryExporter.export(executable: codexPath, directory: project, threadID: rawThreadID)
+            }.value
+            return RemoteBridgeRawHistoryResponse(text: text)
+        } catch {
+            throw Abort(.serviceUnavailable, reason: "Could not read the thread's stored history.")
         }
     }
 

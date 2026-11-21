@@ -665,6 +665,44 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(RemoteCLIUsageReader.claudeWeeklyRemainingPercent(claudeText), 73)
     }
 
+    func testCodexRawHistoryExporterReadsStoredTurnsInChronologicalOrderAcrossPages() throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let path = fixture.directory.resolvingSymlinksInPath().path
+        let script = fixture.directory.appendingPathComponent("app-server-probe")
+        try """
+        #!/bin/sh
+        case "$1" in
+          app-server)
+            count=0
+            while IFS= read -r line; do
+              count=$((count + 1))
+              case "$count" in
+                1)
+                  printf '%s\\n' '{"id":1,"result":{}}'
+                  ;;
+                3)
+                  printf '%s\\n' '{"id":2,"result":{"data":[{"id":"turn2","status":"completed","items":[{"type":"userMessage","content":[{"type":"text","text":"Второй вопрос"}]},{"type":"agentMessage","text":"Второй ответ"}]}],"nextCursor":"p2"}}'
+                  ;;
+                4)
+                  printf '%s\\n' '{"id":3,"result":{"data":[{"id":"turn1","status":"completed","items":[{"type":"userMessage","content":[{"type":"text","text":"Привет"}]},{"type":"agentMessage","text":"Привет! Чем помочь?"}]}],"nextCursor":null}}'
+                  ;;
+              esac
+            done
+            exit 0
+            ;;
+        esac
+        exit 8
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+
+        let text = try CodexRawHistoryExporter.export(executable: script.path, directory: path, threadID: UUID().uuidString)
+        XCTAssertEqual(
+            text,
+            "User: Привет\n\nAssistant: Привет! Чем помочь?\n\nUser: Второй вопрос\n\nAssistant: Второй ответ"
+        )
+    }
+
     func testUsageReturnsPersistedAnswerWithoutQueueOrAgentMode() async throws {
         let fixture = try makeFixture()
         defer { fixture.remove() }

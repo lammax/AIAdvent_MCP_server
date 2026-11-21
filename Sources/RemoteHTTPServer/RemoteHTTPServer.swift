@@ -139,7 +139,8 @@ enum RemoteHTTPServer {
                 conversations: bridgeConversations,
                 usage: RemoteUsageService(reader: RemoteCLIUsageReader(
                     codexPath: codexPath, claudePath: configuration.claudeExecutablePath
-                ))
+                )),
+                codexPath: codexPath
             )
             app.logger.info("Remote Agent Bridge is enabled on the local HTTP server.")
         } else if configuration.bridgeToken != nil {
