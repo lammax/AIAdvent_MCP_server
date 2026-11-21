@@ -3,10 +3,13 @@ import Foundation
 public struct RemoteUsageReport: Sendable {
     public let id: UUID
     public let text: String
+    /// Remaining percent of the 5-hour subscription window, when the CLI reported one.
+    public let fiveHourRemainingPercent: Double?
     public let fetchedAt: Date
-    public init(text: String, fetchedAt: Date = Date()) {
+    public init(text: String, fiveHourRemainingPercent: Double? = nil, fetchedAt: Date = Date()) {
         self.id = UUID()
         self.text = text
+        self.fiveHourRemainingPercent = fiveHourRemainingPercent
         self.fetchedAt = fetchedAt
     }
 }
@@ -111,7 +114,10 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
                             try send(["id": 2, "method": "account/rateLimits/read", "params": [:]])
                         } else if id == 2, let result = message["result"] {
                             let data = try JSONSerialization.data(withJSONObject: result)
-                            return RemoteUsageReport(text: try Self.codexText(data))
+                            return RemoteUsageReport(
+                                text: try Self.codexText(data),
+                                fiveHourRemainingPercent: Self.codexFiveHourRemainingPercent(data)
+                            )
                         }
                     }
                 }
@@ -119,7 +125,10 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
             process.waitUntilExit()
             guard agent == "claude", process.terminationStatus == 0,
                   let text = String(data: buffer, encoding: .utf8) else { throw RemoteUsageError.unavailable }
-            return RemoteUsageReport(text: try Self.claudeText(text))
+            return RemoteUsageReport(
+                text: try Self.claudeText(text),
+                fiveHourRemainingPercent: Self.claudeFiveHourRemainingPercent(text)
+            )
         }.value
     }
 
@@ -141,6 +150,39 @@ public struct RemoteCLIUsageReader: RemoteUsageReading {
         }
         guard !lines.isEmpty else { throw RemoteUsageError.unavailable }
         return "Claude — лимиты аккаунта\n" + lines.joined(separator: "\n")
+    }
+
+    /// Extracted independently of `claudeText` so a change to the display text can never
+    /// silently change what the 10%-remaining switch-over threshold reads.
+    public static func claudeFiveHourRemainingPercent(_ output: String) -> Double? {
+        guard let regex = try? NSRegularExpression(pattern: #"^Current session: ([0-9]+(?:\.[0-9]+)?)% used"#) else {
+            return nil
+        }
+        for line in output.components(separatedBy: .newlines) {
+            let range = NSRange(line.startIndex..., in: line)
+            guard let match = regex.firstMatch(in: line, range: range),
+                  let valueRange = Range(match.range(at: 1), in: line),
+                  let used = Double(line[valueRange]), used.isFinite else { continue }
+            return max(0, min(100, 100 - used))
+        }
+        return nil
+    }
+
+    /// Extracted independently of `codexText` for the same reason as `claudeFiveHourRemainingPercent`.
+    public static func codexFiveHourRemainingPercent(_ data: Data) -> Double? {
+        struct Window: Decodable { let usedPercent: Double?; let windowDurationMins: Int? }
+        struct Bucket: Decodable { let primary: Window?; let secondary: Window? }
+        struct Payload: Decodable { let rateLimits: Bucket?; let rateLimitsByLimitId: [String: Bucket]? }
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return nil }
+        let buckets = payload.rateLimitsByLimitId.flatMap { $0.isEmpty ? nil : $0 }
+            ?? payload.rateLimits.map { ["codex": $0] } ?? [:]
+        for bucket in buckets.values {
+            for window in [bucket.primary, bucket.secondary].compactMap({ $0 }) {
+                guard window.windowDurationMins == 300, let used = window.usedPercent, used.isFinite else { continue }
+                return max(0, min(100, 100 - used))
+            }
+        }
+        return nil
     }
 
     public static func codexText(_ data: Data) throws -> String {
